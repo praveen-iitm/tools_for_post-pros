@@ -271,13 +271,14 @@ to check — try a different `--coord-tol` and compare.
 ## Full examples
 
 ```bash
-# Point cloud, single variable, for correlation analysis:
+# Point cloud, single variable, for correlation analysis with .dat output:
 python run_extract_variable.py \
     --input-dir /data/praveen/nob_rbc_air_3d/dati \
     --output-dir /data/praveen/nob_rbc_air_3d/assembled_T \
     --variable T \
     --coord-tol 1e-6 \
-    --workers 12
+    --workers 12 \
+    --format dat
 
 # Full mesh, all variables, for visualization:
 python run_assemble_full.py \
