@@ -199,4 +199,4 @@ def horizontal_profile(xyz_ref, field_values, z_tol=1e-8):
 def write_profile_dat(filepath, z_levels, profile, names=("Z", "value")):
     """Write a 2-column ASCII .dat file: Z and the averaged value."""
     data = np.column_stack([z_levels, profile])
-    np.savetxt(filepath, data, fmt="%.12g", header=" ".join(names), comments="")
+    np.savetxt(filepath, data, fmt="%.12g")
