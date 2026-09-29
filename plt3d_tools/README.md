@@ -2,9 +2,9 @@
 
 Cluster-runnable post-processing pipeline for Rayleigh–Bénard convection
 (RBC) DNS output written as Plot3D binaries. Refactored out of four
-one-off notebooks into a shared library (`plt_3d_tools/`) and four
+one-off notebooks into a shared library (`plt_3d_tools/`) and five
 standalone, argparse-driven scripts (`scripts/`) meant to be submitted as
-cluster jobs, run one after another.
+cluster jobs.
 
 ```
 plt3d_pipeline/
@@ -15,16 +15,22 @@ plt3d_pipeline/
 │   ├── gradients.py             GradientOps: grad_x/y/z/r bound to one grid + one ref point
 │   ├── plotting.py              plot_slice, plot_slice_2d (interactive use only)
 │   └── parallel.py              run_parallel_accumulation (chunked, RAM-bounded, parallel)
-└── scripts/                   run these on the cluster, IN ORDER
-    ├── 01_compute_mean.py               time-mean u, v, w, T
-    ├── 02_compute_fluctuations_tke.py   turbulent kinetic energy (TKE)
-    ├── 03_two_point_correlation.py      two-point (z-lag) correlations R_ij
-    └── 04_budget_terms.py               TKE- and temperature-variance-budget terms
+└── scripts/                   run these on the cluster
+    ├── 01_compute_mean.py               time-mean u, v, w, T                          } run first
+    ├── 02_compute_fluctuations_tke.py   turbulent kinetic energy (TKE)                }
+    ├── 03_two_point_correlation.py      two-point (z-lag) correlations R_ij           } each needs 01
+    ├── 04_budget_terms.py               TKE- and temperature-variance-budget terms    } needs 01 + 03
+    └── 05_energy_spectrum.py            turbulence energy spectrum along periodic z   } needs 01
 ```
 
 Every script accepts `--solution-dir <folder>` and processes **every**
 matching snapshot file in that folder itself — you never pass individual
 filenames. Point it at the directory, set `--workers`, submit.
+
+Scripts 02, 03 and 05 each only depend on 01's mean fields and can be run
+in any order (or in parallel) once 01 has finished; 04 additionally needs
+03's correlation output for the same reference point. See "Running the
+full pipeline" below for the dependency chain.
 
 ---
 
@@ -306,6 +312,56 @@ Two implementation notes specific to this script:
    behaviour reproduced exactly, say so and it can be added back as an
    option.
 
+### `scripts/05_energy_spectrum.py` — turbulence energy spectrum along periodic z
+
+Computes the power spectral density of u, v, w (and/or T) along the
+periodic z direction — appropriate for a bounded-x,y/periodic-z (tall
+cavity) case. Fluctuations are taken about the **z-averaged** time-mean
+(`mean_tz`, same convention as `TKE_tz` in script 02): since z is
+physically homogeneous, the true mean can't depend on z, so the
+z-average of the 3D time-mean is a better-converged estimate of it than
+the raw 3D `mean_t`. Use `--use-3d-mean` to subtract the z-dependent
+`mean_t` instead — useful as a diagnostic for whether the mean has
+actually converged to z-independence.
+
+Each snapshot's fluctuation field is FFT'd along z (`np.fft.rfft`,
+axis=2) and folded into a one-sided, variance-conserving PSD (Parseval:
+summing all output `P(k)` values recovers the time-mean z-variance).
+Wavenumbers are physical (rad/length), from the grid's z-spacing —
+assumed uniform, since an FFT-based periodic spectrum requires it
+(the script checks and warns if it isn't).
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `--solution-dir` | yes | Folder containing `grid*.f` snapshots. |
+| `--grid-file` | yes | Path to `grid.xyz` — used for the z-spacing / physical wavenumbers. |
+| `--mean-dir` | yes | Directory with `mean_<field>_*.npy` from script 01. |
+| `--mean-tag` | no | Must match script 01's `--tag`. |
+| `--output-dir` | yes | **Parent** directory — results go to `<output-dir>/post_proc_5-spectrum/` (plane-avg) or `<output-dir>/post_proc_5-spectrum_<x>_<y>/` (point). |
+| `--fields` | no | One or more of `u v w T`. Default `u v w`. |
+| `--mode` | no | `plane-avg` (default) averages P(k) over every (x,y) grid point — one spectrum for the whole cavity. `point` gives the local spectrum at a single column. |
+| `--x-idx` / `--y-idx` | if `--mode point` | Reference column indices. |
+| `--use-3d-mean` | no (flag) | Subtract the raw `mean_t` instead of `mean_tz`. |
+| `--workers` | no | Default `cpu_count() - 1`. |
+
+**Outputs**: `k.npy` (physical wavenumbers, length `Nz//2+1`), one
+`P_<field>.npy` per requested field, and — if `u`, `v`, `w` were all
+requested — `E_total.npy = 0.5*(P_uu + P_vv + P_ww)`, the combined
+turbulent kinetic energy spectrum. All `float32`. `k[0]`/`P_*[0]` is the
+k=0 (mean/DC) bin — skip it on a log-log plot:
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+k = np.load(".../k.npy")
+E = np.load(".../E_total.npy")
+plt.loglog(k[1:], E[1:])
+```
+
+Only depends on script 01's mean fields, so it can be run any time after
+01 finishes (independently of, and in parallel with, scripts 02–04).
+
 ---
 
 ## 4. Running the full pipeline
@@ -347,12 +403,26 @@ python scripts/04_budget_terms.py \
     --output-dir   /path/to \
     --x-idx 25 --y-idx 222 \
     --workers 16
+
+# 5. (optional) Turbulence energy spectrum along periodic z — only needs
+#    01's mean fields, so this can run right after step 1, in parallel
+#    with steps 2-4 rather than after them:
+python scripts/05_energy_spectrum.py \
+    --solution-dir /path/to/Case/output \
+    --grid-file    /path/to/Case/output/grid.xyz \
+    --mean-dir     /path/to/post_proc_1-mean \
+    --mean-tag 731-931 \
+    --output-dir   /path/to \
+    --fields u v w \
+    --workers 16
 ```
 
 Each stage only depends on the `.npy` outputs of earlier stages (never on
 another stage's script or in-memory state), so you can submit them as
-four separate, dependent Slurm/PBS jobs (`--dependency=afterok:<jobid>`
-or equivalent) instead of one long interactive run.
+separate, dependent Slurm/PBS jobs (`--dependency=afterok:<jobid>` or
+equivalent) instead of one long interactive run. Steps 2, 3 and 5 each
+depend only on step 1 and are independent of each other; step 4 depends
+on step 1 and on step 3's output for the same reference point.
 
 ### Choosing `--x-idx` / `--y-idx` / `--z-idx`
 
@@ -408,7 +478,8 @@ No non-standard-library dependency is used for the parallelism —
   file written in a different (e.g. big-endian, double-precision)
   format than the `<i4`/`<f4` this reader assumes.
 - **Re-running a stage with different `--x-idx`/`--y-idx`/`--z-idx`**
-  doesn't require re-running script 01 or 02 — only scripts 03 and 04
-  depend on the reference point, and each run writes to its own
-  `..._<x>_<y>[_<z>]/` subfolder, so multiple reference points can
-  coexist under the same `--output-dir`.
+  doesn't require re-running script 01 or 02 — only scripts 03, 04 and
+  05 (in `--mode point`) depend on a reference point, and each run
+  writes to its own `..._<x>_<y>[_<z>]/` subfolder, so multiple
+  reference points can coexist under the same `--output-dir`. Script
+  05's default `--mode plane-avg` has no reference point at all.
