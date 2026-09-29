@@ -2,7 +2,7 @@
 
 Cluster-runnable post-processing pipeline for Rayleigh–Bénard convection
 (RBC) DNS output written as Plot3D binaries. Refactored out of four
-one-off notebooks into a shared library (`plt_3d_tools/`) and five
+one-off notebooks into a shared library (`plt_3d_tools/`) and six
 standalone, argparse-driven scripts (`scripts/`) meant to be submitted as
 cluster jobs.
 
@@ -20,7 +20,8 @@ plt3d_pipeline/
     ├── 02_compute_fluctuations_tke.py   turbulent kinetic energy (TKE)                }
     ├── 03_two_point_correlation.py      two-point (z-lag) correlations R_ij           } each needs 01
     ├── 04_budget_terms.py               TKE- and temperature-variance-budget terms    } needs 01 + 03
-    └── 05_energy_spectrum.py            turbulence energy spectrum along periodic z   } needs 01
+    ├── 05_energy_spectrum.py            turbulence energy spectrum along periodic z   } needs 01
+    └── 06_plot_spectrum.py              plot script 05's output, save as PNG          } needs 05
 ```
 
 Every script accepts `--solution-dir <folder>` and processes **every**
@@ -29,8 +30,9 @@ filenames. Point it at the directory, set `--workers`, submit.
 
 Scripts 02, 03 and 05 each only depend on 01's mean fields and can be run
 in any order (or in parallel) once 01 has finished; 04 additionally needs
-03's correlation output for the same reference point. See "Running the
-full pipeline" below for the dependency chain.
+03's correlation output for the same reference point; 06 is a plotting
+step that only reads 05's `.npy` output (no snapshot files, no workers).
+See "Running the full pipeline" below for the dependency chain.
 
 ---
 
@@ -362,6 +364,38 @@ plt.loglog(k[1:], E[1:])
 Only depends on script 01's mean fields, so it can be run any time after
 01 finishes (independently of, and in parallel with, scripts 02–04).
 
+### `scripts/06_plot_spectrum.py` — plot script 05's output as a PNG
+
+Reads `k.npy` and every `P_<field>.npy` (plus `E_total.npy`, if present)
+from one of script 05's output directories and draws a single log-log
+plot, saved as a PNG. Headless — sets the `Agg` matplotlib backend
+itself, so it runs on a login node or inside a job with no display; it
+doesn't read any `grid*.f` snapshots and has no `--workers` flag.
+
+The k=0 (mean/DC) bin is dropped automatically before plotting, since
+it can't be shown on a log axis and isn't part of the fluctuation
+spectrum.
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `--spectrum-dir` | yes | A script-05 output directory, e.g. `.../post_proc_5-spectrum` or `.../post_proc_5-spectrum_<x>_<y>`. |
+| `--output` | no | PNG path to save to. Default: `<spectrum-dir>/spectrum.png`. |
+| `--fields` | no | Which `P_<field>.npy` to plot (e.g. `u w`). Default: every `P_*.npy` found in `--spectrum-dir`. |
+| `--no-total` | no (flag) | Don't plot `E_total.npy` even if it's present. |
+| `--slope` | no | Overlay a dashed reference line of this log-log slope (e.g. `-1.6667` for Kolmogorov `-5/3`), anchored in the lower part of the plotted k-range. |
+| `--title` | no | Plot title. Default: derived from `--spectrum-dir`'s folder name. |
+| `--dpi` | no | Default `150`. |
+
+**Output**: one PNG with all plotted curves on shared log-log axes,
+legended by field name (`P_u`, `P_v`, ..., `E_total`, and `k^<slope>`
+if `--slope` was given).
+
+```bash
+python scripts/06_plot_spectrum.py \
+    --spectrum-dir /path/to/post_proc_5-spectrum \
+    --slope -1.6667
+```
+
 ---
 
 ## 4. Running the full pipeline
@@ -415,6 +449,12 @@ python scripts/05_energy_spectrum.py \
     --output-dir   /path/to \
     --fields u v w \
     --workers 16
+
+# 6. (optional) Plot step 5's spectrum as a PNG -- just reads 05's .npy
+#    output, no snapshots, no --workers:
+python scripts/06_plot_spectrum.py \
+    --spectrum-dir /path/to/post_proc_5-spectrum \
+    --slope -1.6667
 ```
 
 Each stage only depends on the `.npy` outputs of earlier stages (never on
@@ -422,7 +462,8 @@ another stage's script or in-memory state), so you can submit them as
 separate, dependent Slurm/PBS jobs (`--dependency=afterok:<jobid>` or
 equivalent) instead of one long interactive run. Steps 2, 3 and 5 each
 depend only on step 1 and are independent of each other; step 4 depends
-on step 1 and on step 3's output for the same reference point.
+on step 1 and on step 3's output for the same reference point; step 6
+depends only on step 5.
 
 ### Choosing `--x-idx` / `--y-idx` / `--z-idx`
 
@@ -448,9 +489,10 @@ gave you, so it's worth setting explicitly in cluster jobs.
 numpy
 ```
 
-`matplotlib` is only needed if you use `plt_3d_tools.plotting` (`h5py`,
-which the original notebook imported but never used, is not a dependency
-here).
+`matplotlib` is needed only for `06_plot_spectrum.py` and for
+interactive use of `plt_3d_tools.plotting` — none of scripts 01–05
+import it (`h5py`, which the original notebook imported but never used,
+is not a dependency here either).
 
 No non-standard-library dependency is used for the parallelism —
 `multiprocessing` (standard library) only.
