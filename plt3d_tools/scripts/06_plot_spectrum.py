@@ -105,7 +105,7 @@ def main():
             continue
         P = np.load(p_path)[mask]
         valid = P > 0  # log-scale: drop any non-positive samples (shouldn't normally occur)
-        ax.loglog(k_plot[valid], P[valid], marker='o', markersize=3, linewidth=1.2, label=f"P_{f}")
+        ax.loglog(k_plot[valid], P[valid], marker='o', markersize=2, linewidth=1.0, label=f"P_{f}")
         if first_curve is None:
             first_curve = (k_plot[valid], P[valid])
 
@@ -113,7 +113,7 @@ def main():
     if not args.no_total and os.path.isfile(total_path):
         E = np.load(total_path)[mask]
         valid = E > 0
-        ax.loglog(k_plot[valid], E[valid], color='k', linewidth=2.0, label="E_total")
+        ax.loglog(k_plot[valid], E[valid], color='k', linewidth=1.3, label="E_total")
         total_curve = (k_plot[valid], E[valid])
         if first_curve is None:
             first_curve = total_curve
