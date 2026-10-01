@@ -124,7 +124,6 @@ def main():
     R_uu, R_uv, R_uw, R_uT = load_R('uu'), load_R('uv'), load_R('uw'), load_R('uT')
     R_vu, R_vv, R_vw, R_vT = load_R('vu'), load_R('vv'), load_R('vw'), load_R('vT')
     R_wu, R_wv, R_ww, R_wT = load_R('wu'), load_R('wv'), load_R('ww'), load_R('wT')
-    R_Tu, R_Tv, R_Tw, R_TT = load_R('Tu'), load_R('Tv'), load_R('Tw'), load_R('TT')
 
     g = GradientOps(x, y, z, (x_idx, y_idx, z_idx))
     co_eff = g.co_eff
@@ -175,11 +174,6 @@ def main():
     np.save(os.path.join(e_dir, "E_inter_m"), E_inter_m)
     del E_inter_m, ux_ur, vx_vr, wx_wr
 
-    # Buoyancy source term: E_buoy
-    E_buoy = co_eff * (0.5 * g.grad_r(R_wT + R_Tw) * (-1))
-    np.save(os.path.join(e_dir, "E_buoy"), E_buoy)
-    del E_buoy
-
     # Homogeneous Production: H_prod_h
     gx_w, gy_w, gz_w = g.grad_x(w_mean_tz), g.grad_y(w_mean_tz), g.grad_z(w_mean_tz)
     gx_T2, gy_T2, gz_T2 = g.grad_x(T_mean_tz), g.grad_y(T_mean_tz), g.grad_z(T_mean_tz)
@@ -203,13 +197,8 @@ def main():
     np.save(os.path.join(h_dir, "H_inter_m"), H_inter_m)
     del H_inter_m
 
-    # Buoyancy source term: H_buoy
-    H_buoy = co_eff * (g.grad_r(R_TT) * (-1))
-    np.save(os.path.join(h_dir, "H_buoy"), H_buoy)
-    del H_buoy
-
     del R_uu, R_uv, R_uw, R_uT, R_vu, R_vv, R_vw, R_vT
-    del R_wu, R_wv, R_ww, R_wT, R_Tu, R_Tv, R_Tw, R_TT
+    del R_wu, R_wv, R_ww, R_wT
 
     # -------------------------------------------------------------
     # Terms that need a streaming pass over every snapshot

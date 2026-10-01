@@ -285,17 +285,17 @@ a fixed reference point `(x_idx, y_idx, z_idx)`.
 │   ├── E_prod_h.npy     Homogeneous production
 │   ├── E_prod_I.npy     Inhomogeneous production
 │   ├── E_inter_m.npy    Interscale transport, mean velocity
-│   ├── E_inter_f.npy    Interscale transport, fluctuating velocity
-│   └── E_buoy.npy       Buoyancy source term
+│   └── E_inter_f.npy    Interscale transport, fluctuating velocity
 └── h_terms/
     ├── H_prod_h.npy     Homogeneous production
     ├── H_prod_I.npy     Inhomogeneous production
     ├── H_inter_m.npy    Interscale transport, mean velocity
-    ├── H_inter_f.npy    Interscale transport, fluctuating velocity
-    └── H_buoy.npy       Buoyancy source term
+    └── H_inter_f.npy    Interscale transport, fluctuating velocity
 ```
 All `ndarray`, shape `(nx,ny,nz)` (`co_eff`-weighted, same normalization
-as the original notebook).
+as the original notebook). The buoyancy source terms (`E_buoy`, `H_buoy`)
+that the original notebook computed from `R_wT`/`R_Tw`/`R_TT` are not
+computed by this script.
 
 Two implementation notes specific to this script:
 
@@ -376,19 +376,35 @@ The k=0 (mean/DC) bin is dropped automatically before plotting, since
 it can't be shown on a log axis and isn't part of the fluctuation
 spectrum.
 
+If `--slope` is given, the script locates where the plotted spectrum
+actually behaves like that power law rather than anchoring anywhere
+fixed. It fits a windowed least-squares line (in log-log space) at every
+position along the curve (`E_total` if present, else the first plotted
+field), restricts the search to **before the curve's steepest point**
+(a real inertial range can only occur before the dissipation-range
+roll-off — the curve flattening back out into the noise floor at high k
+sweeps back through the same slope value on the way out, which is an
+estimation artifact, not physics, and is deliberately excluded), prefers
+windows with a good power-law fit (R² ≥ 0.9) among the remaining
+candidates, and draws the dashed reference line through whichever of
+those has a fitted slope closest to `--slope`. The legend reports both
+where it landed and how good the match actually was, e.g.
+`k^-1.67  (near k≈9.7, fit k^-1.66, R²=0.99)` — a low reported R² is a
+signal the match isn't a clean power law, not a bug.
+
 | Flag | Required | Meaning |
 |---|---|---|
 | `--spectrum-dir` | yes | A script-05 output directory, e.g. `.../post_proc_5-spectrum` or `.../post_proc_5-spectrum_<x>_<y>`. |
 | `--output` | no | PNG path to save to. Default: `<spectrum-dir>/spectrum.png`. |
 | `--fields` | no | Which `P_<field>.npy` to plot (e.g. `u w`). Default: every `P_*.npy` found in `--spectrum-dir`. |
 | `--no-total` | no (flag) | Don't plot `E_total.npy` even if it's present. |
-| `--slope` | no | Overlay a dashed reference line of this log-log slope (e.g. `-1.6667` for Kolmogorov `-5/3`), anchored in the lower part of the plotted k-range. |
+| `--slope` | no | Overlay a dashed reference line of this log-log slope (e.g. `-1.6667` for Kolmogorov `-5/3`), positioned as described above. |
 | `--title` | no | Plot title. Default: derived from `--spectrum-dir`'s folder name. |
 | `--dpi` | no | Default `150`. |
 
 **Output**: one PNG with all plotted curves on shared log-log axes,
-legended by field name (`P_u`, `P_v`, ..., `E_total`, and `k^<slope>`
-if `--slope` was given).
+legended by field name (`P_u`, `P_v`, ..., `E_total`, and
+`k^<slope>  (near k≈…, fit k^…, R²=…)` if `--slope` was given).
 
 ```bash
 python scripts/06_plot_spectrum.py \
