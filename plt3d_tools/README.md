@@ -2,7 +2,7 @@
 
 Cluster-runnable post-processing pipeline for Rayleigh–Bénard convection
 (RBC) DNS output written as Plot3D binaries. Refactored out of four
-one-off notebooks into a shared library (`plt_3d_tools/`) and six
+one-off notebooks into a shared library (`plt_3d_tools/`) and seven
 standalone, argparse-driven scripts (`scripts/`) meant to be submitted as
 cluster jobs.
 
@@ -21,7 +21,8 @@ plt3d_pipeline/
     ├── 03_two_point_correlation.py      two-point (z-lag) correlations R_ij           } each needs 01
     ├── 04_budget_terms.py               TKE- and temperature-variance-budget terms    } needs 01 + 03
     ├── 05_energy_spectrum.py            turbulence energy spectrum along periodic z   } needs 01
-    └── 06_plot_spectrum.py              plot script 05's output, save as PNG          } needs 05
+    ├── 06_plot_spectrum.py              plot script 05's output, save as PNG          } needs 05
+    └── 07_write_tecplot_terms.py        export 04's budget terms to Tecplot .dat      } needs 04
 ```
 
 Every script accepts `--solution-dir <folder>` and processes **every**
@@ -31,8 +32,10 @@ filenames. Point it at the directory, set `--workers`, submit.
 Scripts 02, 03 and 05 each only depend on 01's mean fields and can be run
 in any order (or in parallel) once 01 has finished; 04 additionally needs
 03's correlation output for the same reference point; 06 is a plotting
-step that only reads 05's `.npy` output (no snapshot files, no workers).
-See "Running the full pipeline" below for the dependency chain.
+step that only reads 05's `.npy` output (no snapshot files, no workers);
+07 is a format-conversion step that only reads 04's `.npy` output (also
+no snapshot files, no workers). See "Running the full pipeline" below
+for the dependency chain.
 
 ---
 
@@ -174,7 +177,7 @@ argument (see e.g. script 01/03's `_init`, which ignores some of the
 
 ---
 
-## 3. `scripts/` — the four pipeline stages
+## 3. `scripts/` — the pipeline stages
 
 Run `python scripts/0N_*.py --help` at any time for the authoritative
 flag list; this section explains what each one does and why.
@@ -412,6 +415,68 @@ python scripts/06_plot_spectrum.py \
     --slope -1.6667
 ```
 
+### `scripts/07_write_tecplot_terms.py` — export script 04's budget terms to Tecplot
+
+Writes `04_budget_terms.py`'s `e_terms/`/`h_terms/` `.npy` output out as
+Tecplot ASCII (POINT-format) `.dat` files, for visualization in
+Tecplot/ParaView. Adapted from the Tecplot-export portion of a different
+case's post-proc-7 notebook — scoped down to just that one job; the
+notebook's inline two-point-correlation recomputation and its "live"
+single-snapshot FFT sanity check aren't part of this pipeline's script 07
+(03's `R_*.npy` already covers the correlations, and there's currently
+nothing to export those to Tecplot too if that's ever needed).
+
+Which variables end up in the `.dat` files is driven entirely by which
+`E_*.npy`/`H_*.npy` files are actually present in `--terms-dir` — this
+repo's `04_budget_terms.py` currently writes `prod_h`, `prod_I`,
+`inter_m`, `inter_f` only (no dissipation or buoyancy terms, see script
+04's entry above), unlike the other case's more complete calc script. A
+`*_prod_tot`/`*_inter_tot` column is added automatically whenever both
+halves of that combination are present, so this script also works
+unmodified if a future version of 04 (or a hand-added `E_diss.npy` etc.)
+adds more terms.
+
+Coordinates written out are the **separation vector** `(r_x, r_y, r_z)`
+from the budget terms' reference point, not absolute grid coordinates —
+matching both the original notebook and the two-point framework the
+budget terms themselves are defined in. `GradientOps` (from
+`plt_3d_tools/gradients.py`) is reused to build `r_x`/`r_y`/`r_z`/`co_eff`,
+so they're guaranteed identical to what script 04 itself used, rather
+than being recomputed by hand.
+
+By default, `(x_idx, y_idx, z_idx)` are parsed straight out of
+`--terms-dir`'s folder name (`post-proc-4_terms_calc_<x>_<y>_<z>`), so
+you don't have to retype the same three numbers and risk a mismatch with
+the actual data; `--x-idx`/`--y-idx`/`--z-idx` override this if the
+folder's been renamed.
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `--terms-dir` | yes | Script 04's output directory, e.g. `.../post-proc-4_terms_calc_<x>_<y>_<z>`. |
+| `--grid-file` | yes | Path to `grid.xyz`. |
+| `--output-dir` | yes | **Parent** directory — results go to `<output-dir>/post-proc-7_tecplot_<x>_<y>_<z>/`. |
+| `--x-idx` / `--y-idx` / `--z-idx` | no | Override the reference point parsed from `--terms-dir`'s name. Required if that name doesn't match the `_<x>_<y>_<z>` pattern. |
+
+**Outputs** (in `<output-dir>/post-proc-7_tecplot_<x>_<y>_<z>/`):
+`E_solution.dat` (from `e_terms/`) and `H_solution.dat` (from
+`h_terms/`) — each a structured Tecplot ASCII file, `ZONE I=nx, J=ny,
+K=nz, F=POINT`, one line per grid point in i-fastest/j/k order, columns
+`X Y Z` (the separation vector) followed by whichever budget-term
+columns were found. Either file is skipped with a warning (not an
+error) if its source directory is missing or empty — e.g. you'll still
+get `E_solution.dat` if `h_terms/` doesn't exist for some reason.
+
+No `--solution-dir` and no `--workers`: this script only reads `.npy`
+files and the grid, so there's no snapshot loop and no parallelism to
+configure.
+
+```bash
+python scripts/07_write_tecplot_terms.py \
+    --terms-dir  /path/to/post-proc-4_terms_calc_25_222_64 \
+    --grid-file  /path/to/Case/output/grid.xyz \
+    --output-dir /path/to
+```
+
 ---
 
 ## 4. Running the full pipeline
@@ -471,6 +536,13 @@ python scripts/05_energy_spectrum.py \
 python scripts/06_plot_spectrum.py \
     --spectrum-dir /path/to/post_proc_5-spectrum \
     --slope -1.6667
+
+# 7. (optional) Export step 4's budget terms to Tecplot .dat -- just
+#    reads 04's .npy output, no snapshots, no --workers:
+python scripts/07_write_tecplot_terms.py \
+    --terms-dir  /path/to/post-proc-4_terms_calc_25_222_64 \
+    --grid-file  /path/to/Case/output/grid.xyz \
+    --output-dir /path/to
 ```
 
 Each stage only depends on the `.npy` outputs of earlier stages (never on
@@ -479,7 +551,8 @@ separate, dependent Slurm/PBS jobs (`--dependency=afterok:<jobid>` or
 equivalent) instead of one long interactive run. Steps 2, 3 and 5 each
 depend only on step 1 and are independent of each other; step 4 depends
 on step 1 and on step 3's output for the same reference point; step 6
-depends only on step 5.
+depends only on step 5; step 7 depends only on step 4 (and the same
+reference point step 4 used).
 
 ### Choosing `--x-idx` / `--y-idx` / `--z-idx`
 
@@ -506,9 +579,9 @@ numpy
 ```
 
 `matplotlib` is needed only for `06_plot_spectrum.py` and for
-interactive use of `plt_3d_tools.plotting` — none of scripts 01–05
-import it (`h5py`, which the original notebook imported but never used,
-is not a dependency here either).
+interactive use of `plt_3d_tools.plotting` — none of the other scripts
+(01–05, 07) import it (`h5py`, which the original notebook imported but
+never used, is not a dependency here either).
 
 No non-standard-library dependency is used for the parallelism —
 `multiprocessing` (standard library) only.
@@ -540,4 +613,8 @@ No non-standard-library dependency is used for the parallelism —
   05 (in `--mode point`) depend on a reference point, and each run
   writes to its own `..._<x>_<y>[_<z>]/` subfolder, so multiple
   reference points can coexist under the same `--output-dir`. Script
-  05's default `--mode plane-avg` has no reference point at all.
+  05's default `--mode plane-avg` has no reference point at all. Script
+  07 doesn't take a reference point as input at all — it reads it back
+  out of whichever `post-proc-4_terms_calc_<x>_<y>_<z>/` directory you
+  point `--terms-dir` at (overridable with `--x-idx`/`--y-idx`/`--z-idx`
+  if that folder's been renamed).
