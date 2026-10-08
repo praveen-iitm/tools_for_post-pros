@@ -2,7 +2,7 @@
 
 Cluster-runnable post-processing pipeline for Rayleigh–Bénard convection
 (RBC) DNS output written as Plot3D binaries. Refactored out of four
-one-off notebooks into a shared library (`plt_3d_tools/`) and seven
+one-off notebooks into a shared library (`plt_3d_tools/`) and eight
 standalone, argparse-driven scripts (`scripts/`) meant to be submitted as
 cluster jobs.
 
@@ -22,20 +22,23 @@ plt3d_pipeline/
     ├── 04_budget_terms.py               TKE- and temperature-variance-budget terms    } needs 01 + 03
     ├── 05_energy_spectrum.py            turbulence energy spectrum along periodic z   } needs 01
     ├── 06_plot_spectrum.py              plot script 05's output, save as PNG          } needs 05
-    └── 07_write_tecplot_terms.py        export 04's budget terms to Tecplot .dat      } needs 04
+    ├── 07_write_tecplot_terms.py        export 04's budget terms to Tecplot .dat      } needs 04
+    └── 08_plot_xy_slices.py             plot x-y slices (mean + instantaneous), PNGs  } needs 01
 ```
 
 Every script accepts `--solution-dir <folder>` and processes **every**
 matching snapshot file in that folder itself — you never pass individual
 filenames. Point it at the directory, set `--workers`, submit.
 
-Scripts 02, 03 and 05 each only depend on 01's mean fields and can be run
-in any order (or in parallel) once 01 has finished; 04 additionally needs
-03's correlation output for the same reference point; 06 is a plotting
-step that only reads 05's `.npy` output (no snapshot files, no workers);
-07 is a format-conversion step that only reads 04's `.npy` output (also
-no snapshot files, no workers). See "Running the full pipeline" below
-for the dependency chain.
+Scripts 02, 03, 05 and 08 each only depend on 01's mean fields and can be
+run in any order (or in parallel) once 01 has finished; 04 additionally
+needs 03's correlation output for the same reference point; 06 is a
+plotting step that only reads 05's `.npy` output (no snapshot files, no
+workers); 07 is a format-conversion step that only reads 04's `.npy`
+output (also no snapshot files, no workers); 08 is a plotting step that
+reads 01's mean fields plus one snapshot file (just one, not the whole
+`--solution-dir` loop every other snapshot-reading script does). See
+"Running the full pipeline" below for the dependency chain.
 
 ---
 
@@ -477,6 +480,67 @@ python scripts/07_write_tecplot_terms.py \
     --output-dir /path/to
 ```
 
+### `scripts/08_plot_xy_slices.py` — plot x-y slices (mean + instantaneous)
+
+Plots x-y contour slices at a fixed z-index (default: the midplane,
+`nz // 2`) of script 01's time-mean fields and of one instantaneous
+snapshot, field-by-field, saved as PNGs. Headless — sets the `Agg`
+matplotlib backend itself, same as script 06.
+
+For each requested field it writes **two** separate PNGs rather than one
+combined figure, so each can be viewed, cropped, or shared on its own:
+`mean_<field>_z<z_idx>.png` and `instant_<field>_z<z_idx>_<snapshot
+tag>.png`. The matching pair share a filename stem for easy pairing.
+Figures are drawn portrait (`4.5" × 7"`), since an RBC tall-cavity x-y
+cross-section is much taller than it is wide, and the colorbar axis is
+built from the plotting axis itself (`mpl_toolkits.axes_grid1`'s
+`make_axes_locatable`) so it always matches the domain's height exactly
+regardless of aspect ratio, rather than the default matplotlib colorbar
+sizing. Output is tight-cropped (`bbox_inches='tight'`) to avoid wasted
+white margins around a narrow domain.
+
+By default each plot's color scale is independent — an instantaneous RBC
+velocity field typically has a much wider range than its own time-mean
+(which is smoothed by averaging over every snapshot), so sharing one
+scale often washes the mean field's structure out to a nearly uniform
+color. Pass `--shared-scale` to force both plots for a field onto one
+common `(vmin, vmax)` instead, when a direct like-for-like comparison is
+what you actually want.
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `--grid-file` | yes | Path to `grid.xyz`. |
+| `--mean-dir` | yes | Directory with `mean_<field>_*.npy` from script 01. |
+| `--mean-tag` | no | Must match script 01's `--tag`. |
+| `--solution-dir` | yes | Folder containing `grid*.f` snapshots — only **one** is read (for the instantaneous slice), not the whole folder. |
+| `--output-dir` | yes | **Parent** directory — results go to `<output-dir>/post-proc-8_xy_slices_z<z_idx>/`. |
+| `--fields` | no | One or more of `u v w T`. Default: all four. |
+| `--z-idx` | no | z-index to slice at. Default: `nz // 2`. |
+| `--snapshot-index` | no | Which snapshot to use for the instantaneous slice, as an index into the sorted `--solution-dir` file list. Default `0` (the earliest snapshot found). |
+| `--snapshot-file` | no | Use this specific snapshot file instead of `--snapshot-index`. |
+| `--shared-scale` | no (flag) | Tie each field's mean/instantaneous plot to one common color scale instead of scaling them independently. |
+| `--cmap` | no | Matplotlib colormap name. Default `jet` (matches `plt_3d_tools.plotting`'s quick-look plots). |
+| `--dpi` | no | Default `150`. |
+
+**Outputs** (in `<output-dir>/post-proc-8_xy_slices_z<z_idx>/`): for each
+requested field present, `mean_<field>_z<z_idx>.png` and
+`instant_<field>_z<z_idx>_<snapshot tag>.png`. A field is skipped with a
+warning (not an error) if its `mean_*.npy` file is missing, its shape
+doesn't match the grid, or the snapshot doesn't have that many variables.
+
+No `--workers`: only one snapshot file is ever read, so there's no
+parallelism to configure.
+
+```bash
+python scripts/08_plot_xy_slices.py \
+    --grid-file    /path/to/Case/output/grid.xyz \
+    --mean-dir     /path/to/post_proc_1-mean \
+    --mean-tag 731-931 \
+    --solution-dir /path/to/Case/output \
+    --output-dir   /path/to \
+    --fields u v w T
+```
+
 ---
 
 ## 4. Running the full pipeline
@@ -543,16 +607,27 @@ python scripts/07_write_tecplot_terms.py \
     --terms-dir  /path/to/post-proc-4_terms_calc_25_222_64 \
     --grid-file  /path/to/Case/output/grid.xyz \
     --output-dir /path/to
+
+# 8. (optional) Plot x-y slices of step 1's mean fields and one
+#    instantaneous snapshot as PNGs -- only needs step 1, so (like step
+#    5) this can run right after step 1 finishes, no --workers:
+python scripts/08_plot_xy_slices.py \
+    --grid-file    /path/to/Case/output/grid.xyz \
+    --mean-dir     /path/to/post_proc_1-mean \
+    --mean-tag 731-931 \
+    --solution-dir /path/to/Case/output \
+    --output-dir   /path/to \
+    --fields u v w T
 ```
 
 Each stage only depends on the `.npy` outputs of earlier stages (never on
 another stage's script or in-memory state), so you can submit them as
 separate, dependent Slurm/PBS jobs (`--dependency=afterok:<jobid>` or
-equivalent) instead of one long interactive run. Steps 2, 3 and 5 each
+equivalent) instead of one long interactive run. Steps 2, 3, 5 and 8 each
 depend only on step 1 and are independent of each other; step 4 depends
 on step 1 and on step 3's output for the same reference point; step 6
 depends only on step 5; step 7 depends only on step 4 (and the same
-reference point step 4 used).
+reference point step 4 used); step 8 depends only on step 1.
 
 ### Choosing `--x-idx` / `--y-idx` / `--z-idx`
 
@@ -578,10 +653,11 @@ gave you, so it's worth setting explicitly in cluster jobs.
 numpy
 ```
 
-`matplotlib` is needed only for `06_plot_spectrum.py` and for
-interactive use of `plt_3d_tools.plotting` — none of the other scripts
-(01–05, 07) import it (`h5py`, which the original notebook imported but
-never used, is not a dependency here either).
+`matplotlib` is needed only for `06_plot_spectrum.py`,
+`08_plot_xy_slices.py`, and for interactive use of
+`plt_3d_tools.plotting` — none of the other scripts (01–05, 07) import it
+(`h5py`, which the original notebook imported but never used, is not a
+dependency here either).
 
 No non-standard-library dependency is used for the parallelism —
 `multiprocessing` (standard library) only.
