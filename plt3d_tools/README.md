@@ -23,7 +23,7 @@ plt3d_pipeline/
     ├── 05_energy_spectrum.py            turbulence energy spectrum along periodic z   } needs 01
     ├── 06_plot_spectrum.py              plot script 05's output, save as PNG          } needs 05
     ├── 07_write_tecplot_terms.py        export 04's budget terms to Tecplot .dat      } needs 04
-    └── 08_plot_xy_slices.py             plot x-y slices (mean + instantaneous), PNGs  } needs 01
+    └── 08_plot_xy_slices.py             plot x-y slices (mean/TKE + instantaneous), PNGs } needs 01 (+02 for TKE)
 ```
 
 Every script accepts `--solution-dir <folder>` and processes **every**
@@ -37,8 +37,9 @@ plotting step that only reads 05's `.npy` output (no snapshot files, no
 workers); 07 is a format-conversion step that only reads 04's `.npy`
 output (also no snapshot files, no workers); 08 is a plotting step that
 reads 01's mean fields plus one snapshot file (just one, not the whole
-`--solution-dir` loop every other snapshot-reading script does). See
-"Running the full pipeline" below for the dependency chain.
+`--solution-dir` loop every other snapshot-reading script does), and
+optionally 02's `TKE_t`/`TKE_tz` output too if requested. See "Running
+the full pipeline" below for the dependency chain.
 
 ---
 
@@ -271,6 +272,19 @@ Computes the two-point TKE-budget terms (`E_*`, saved under `e_terms/`)
 and temperature-variance-budget terms (`H_*`, saved under `h_terms/`) at
 a fixed reference point `(x_idx, y_idx, z_idx)`.
 
+The `H_*` terms budget the two-point heat-flux correlation
+`<u_i'(r) T'(r+x)>` for one fixed velocity component `i` — which
+component is `--flux-dir` (default `w`, the vertical heat flux, matching
+the original notebook). Pass `--flux-dir v` to budget the heat flux in
+`y` instead (or `u` for `x`); all three components' correlations are
+already loaded from script 03's output regardless of which is chosen, so
+nothing upstream needs recomputing to switch directions. A non-default
+`--flux-dir` writes to its own `..._flux<dir>` output folder (e.g.
+`post-proc-4_terms_calc_25_222_64_fluxv`) so runs for different
+directions don't collide; the `e_terms/`/`h_terms/` subfolder names
+themselves are unchanged, so script 07 still works unmodified on any of
+them.
+
 | Flag | Required | Meaning |
 |---|---|---|
 | `--solution-dir` | yes | Folder containing `grid*.f` snapshots (needed for `E_inter_f`/`H_inter_f`, which require one more streaming pass). |
@@ -278,15 +292,16 @@ a fixed reference point `(x_idx, y_idx, z_idx)`.
 | `--mean-dir` | yes | Directory with `mean_u/v/w/T_*.npy` from script 01. |
 | `--mean-tag` | no | Must match script 01's `--tag`. |
 | `--corr-dir` | yes | Directory with the 16 `R_*.npy` files from script 03 (i.e. its `post_proc_3-tp_<x>_<y>/` output folder). |
-| `--output-dir` | yes | **Parent** directory — results go to `<output-dir>/post-proc-4_terms_calc_<x_idx>_<y_idx>_<z_idx>/`. |
+| `--output-dir` | yes | **Parent** directory — results go to `<output-dir>/post-proc-4_terms_calc_<x_idx>_<y_idx>_<z_idx>[_flux<dir>]/`. |
 | `--x-idx` | yes | Reference point x-grid-index. Must match the `R_*.npy` files' reference point. |
 | `--y-idx` | yes | Reference point y-grid-index. Must match the `R_*.npy` files' reference point. |
 | `--z-idx` | no | Reference point z-grid-index. Default `nz // 2`. |
+| `--flux-dir` | no | Which velocity component's correlation with T the `H_*` terms are budgeted for: `u`, `v`, or `w`. Default `w`. |
 | `--workers` | no | Default `cpu_count() - 1`. Only used for the `E_inter_f`/`H_inter_f` streaming pass. |
 
 **Outputs**:
 ```
-<output-dir>/post-proc-4_terms_calc_<x>_<y>_<z>/
+<output-dir>/post-proc-4_terms_calc_<x>_<y>_<z>[_flux<dir>]/
 ├── e_terms/
 │   ├── E_prod_h.npy     Homogeneous production
 │   ├── E_prod_I.npy     Inhomogeneous production
@@ -301,24 +316,28 @@ a fixed reference point `(x_idx, y_idx, z_idx)`.
 All `ndarray`, shape `(nx,ny,nz)` (`co_eff`-weighted, same normalization
 as the original notebook). The buoyancy source terms (`E_buoy`, `H_buoy`)
 that the original notebook computed from `R_wT`/`R_Tw`/`R_TT` are not
-computed by this script.
+computed by this script. The `_flux<dir>` suffix is omitted for the
+default `--flux-dir w`, so existing `w`-direction runs/output paths are
+unaffected by this option's addition.
 
-Two implementation notes specific to this script:
+Three implementation notes specific to this script:
 
 1. **Merged streaming pass.** The original notebook read every snapshot
    *twice* — once for `E_inter_f`'s accumulators (`xg,yg,zg`, needing
-   u/v/w fluctuations) and again for `H_inter_f`'s (`wt_u,wt_v,wt_w`,
-   needing u/v/w/T fluctuations). Since the second read is a strict
-   superset of the first, this script computes all six accumulators in
-   **one** combined pass, halving the I/O for this stage.
+   u/v/w fluctuations) and again for `H_inter_f`'s (needing u/v/w/T
+   fluctuations). Since the second read is a strict superset of the
+   first, this script computes all six accumulators in **one** combined
+   pass, halving the I/O for this stage.
 2. **Bug fix vs. the original notebook.** The original `H_inter_f` loop
-   assigned `wt_u = ...`, `wt_v = ...`, `wt_w = ...` with `=` instead of
-   `+=` on every iteration — so only the *last* snapshot's contribution
-   survived the final division by `n_snaps`, unlike the structurally
-   identical `E_inter_f` loop (which correctly used `+=`). This script
-   accumulates both consistently. If you need the original (buggy)
-   behaviour reproduced exactly, say so and it can be added back as an
-   option.
+   assigned its accumulators with `=` instead of `+=` on every
+   iteration — so only the *last* snapshot's contribution survived the
+   final division by `n_snaps`, unlike the structurally identical
+   `E_inter_f` loop (which correctly used `+=`). This script accumulates
+   both consistently. If you need the original (buggy) behaviour
+   reproduced exactly, say so and it can be added back as an option.
+3. **`--flux-dir` doesn't touch `E_*`.** The TKE-budget terms (`E_*`)
+   don't involve a heat-flux direction at all, so they're bit-identical
+   across every `--flux-dir` choice — only `H_*` changes.
 
 ### `scripts/05_energy_spectrum.py` — turbulence energy spectrum along periodic z
 
@@ -448,10 +467,11 @@ so they're guaranteed identical to what script 04 itself used, rather
 than being recomputed by hand.
 
 By default, `(x_idx, y_idx, z_idx)` are parsed straight out of
-`--terms-dir`'s folder name (`post-proc-4_terms_calc_<x>_<y>_<z>`), so
-you don't have to retype the same three numbers and risk a mismatch with
-the actual data; `--x-idx`/`--y-idx`/`--z-idx` override this if the
-folder's been renamed.
+`--terms-dir`'s folder name (`post-proc-4_terms_calc_<x>_<y>_<z>`,
+optionally followed by script 04's `_flux<dir>` suffix, which is parsed
+past if present), so you don't have to retype the same three numbers and
+risk a mismatch with the actual data; `--x-idx`/`--y-idx`/`--z-idx`
+override this if the folder's been renamed to something else entirely.
 
 | Flag | Required | Meaning |
 |---|---|---|
@@ -507,28 +527,39 @@ color. Pass `--shared-scale` to force both plots for a field onto one
 common `(vmin, vmax)` instead, when a direct like-for-like comparison is
 what you actually want.
 
+`--fields` can also include `TKE_t`/`TKE_tz` (script 02's output). These
+are already time-averaged quantities, not per-snapshot fields, so there's
+no instantaneous counterpart to pair them with — each gets just one PNG,
+`tke_t_z<z_idx>.png` / `tke_tz_z<z_idx>.png`, loaded from `--tke-dir`
+(script 02's `--output-dir`) instead of `--mean-dir`. If `TKE_t`/`TKE_tz`
+are the *only* fields requested, `--solution-dir` isn't needed at all —
+no snapshot is read.
+
 | Flag | Required | Meaning |
 |---|---|---|
 | `--grid-file` | yes | Path to `grid.xyz`. |
 | `--mean-dir` | yes | Directory with `mean_<field>_*.npy` from script 01. |
 | `--mean-tag` | no | Must match script 01's `--tag`. |
-| `--solution-dir` | yes | Folder containing `grid*.f` snapshots — only **one** is read (for the instantaneous slice), not the whole folder. |
+| `--solution-dir` | if `u`/`v`/`w`/`T` requested | Folder containing `grid*.f` snapshots — only **one** is read (for the instantaneous slice), not the whole folder. |
+| `--tke-dir` | if `TKE_t`/`TKE_tz` requested | Directory with `TKE_t.npy`/`TKE_tz.npy` from `02_compute_fluctuations_tke.py`. |
 | `--output-dir` | yes | **Parent** directory — results go to `<output-dir>/post-proc-8_xy_slices_z<z_idx>/`. |
-| `--fields` | no | One or more of `u v w T`. Default: all four. |
+| `--fields` | no | One or more of `u v w T TKE_t TKE_tz`. Default: `u v w T`. |
 | `--z-idx` | no | z-index to slice at. Default: `nz // 2`. |
 | `--snapshot-index` | no | Which snapshot to use for the instantaneous slice, as an index into the sorted `--solution-dir` file list. Default `0` (the earliest snapshot found). |
 | `--snapshot-file` | no | Use this specific snapshot file instead of `--snapshot-index`. |
-| `--shared-scale` | no (flag) | Tie each field's mean/instantaneous plot to one common color scale instead of scaling them independently. |
+| `--shared-scale` | no (flag) | Tie each `u`/`v`/`w`/`T` field's mean/instantaneous plot to one common color scale instead of scaling them independently. Doesn't apply to `TKE_t`/`TKE_tz` (single plot, nothing to share a scale with). |
 | `--cmap` | no | Matplotlib colormap name. Default `jet` (matches `plt_3d_tools.plotting`'s quick-look plots). |
 | `--dpi` | no | Default `150`. |
 
 **Outputs** (in `<output-dir>/post-proc-8_xy_slices_z<z_idx>/`): for each
-requested field present, `mean_<field>_z<z_idx>.png` and
-`instant_<field>_z<z_idx>_<snapshot tag>.png`. A field is skipped with a
-warning (not an error) if its `mean_*.npy` file is missing, its shape
-doesn't match the grid, or the snapshot doesn't have that many variables.
+requested `u`/`v`/`w`/`T` field present, `mean_<field>_z<z_idx>.png` and
+`instant_<field>_z<z_idx>_<snapshot tag>.png`; for each requested
+`TKE_t`/`TKE_tz` present, one `tke_t_z<z_idx>.png` / `tke_tz_z<z_idx>.png`.
+A field is skipped with a warning (not an error) if its source `.npy`
+file is missing, its shape doesn't match the grid, or (for `u`/`v`/`w`/`T`)
+the snapshot doesn't have that many variables.
 
-No `--workers`: only one snapshot file is ever read, so there's no
+No `--workers`: at most one snapshot file is ever read, so there's no
 parallelism to configure.
 
 ```bash
@@ -537,8 +568,9 @@ python scripts/08_plot_xy_slices.py \
     --mean-dir     /path/to/post_proc_1-mean \
     --mean-tag 731-931 \
     --solution-dir /path/to/Case/output \
+    --tke-dir      /path/to/post_proc_2-fluc \
     --output-dir   /path/to \
-    --fields u v w T
+    --fields u v w T TKE_t TKE_tz
 ```
 
 ---
@@ -610,7 +642,9 @@ python scripts/07_write_tecplot_terms.py \
 
 # 8. (optional) Plot x-y slices of step 1's mean fields and one
 #    instantaneous snapshot as PNGs -- only needs step 1, so (like step
-#    5) this can run right after step 1 finishes, no --workers:
+#    5) this can run right after step 1 finishes, no --workers. Add
+#    --tke-dir <step 2's --output-dir> and TKE_t/TKE_tz to --fields to
+#    also plot step 2's TKE fields (if step 2 was run):
 python scripts/08_plot_xy_slices.py \
     --grid-file    /path/to/Case/output/grid.xyz \
     --mean-dir     /path/to/post_proc_1-mean \
@@ -627,7 +661,8 @@ equivalent) instead of one long interactive run. Steps 2, 3, 5 and 8 each
 depend only on step 1 and are independent of each other; step 4 depends
 on step 1 and on step 3's output for the same reference point; step 6
 depends only on step 5; step 7 depends only on step 4 (and the same
-reference point step 4 used); step 8 depends only on step 1.
+reference point step 4 used); step 8 depends only on step 1 (optionally
+also on step 2's output, if `--fields` includes `TKE_t`/`TKE_tz`).
 
 ### Choosing `--x-idx` / `--y-idx` / `--z-idx`
 

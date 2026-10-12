@@ -142,7 +142,10 @@ def main():
     # gives its output (post-proc-4_terms_calc_<x>_<y>_<z>), so you don't
     # have to pass the same three numbers twice and risk a mismatch; any
     # of --x-idx/--y-idx/--z-idx explicitly given overrides the parsed value.
-    m = re.search(r'_(\d+)_(\d+)_(\d+)$', os.path.basename(os.path.normpath(args.terms_dir)))
+    # Also matches a trailing "_flux<u|v|w>" from 04_budget_terms.py's
+    # --flux-dir option (e.g. "..._25_222_64_fluxv"), so the reference
+    # point still auto-parses for a non-default flux direction's folder.
+    m = re.search(r'_(\d+)_(\d+)_(\d+)(?:_flux[uvw])?$', os.path.basename(os.path.normpath(args.terms_dir)))
     if m is None and (args.x_idx is None or args.y_idx is None or args.z_idx is None):
         sys.exit(f"Could not parse a reference point from --terms-dir ({args.terms_dir!r}); "
                   f"pass --x-idx/--y-idx/--z-idx explicitly.")
