@@ -2,7 +2,7 @@
 
 Cluster-runnable post-processing pipeline for Rayleigh–Bénard convection
 (RBC) DNS output written as Plot3D binaries. Refactored out of four
-one-off notebooks into a shared library (`plt_3d_tools/`) and eight
+one-off notebooks into a shared library (`plt_3d_tools/`) and nine
 standalone, argparse-driven scripts (`scripts/`) meant to be submitted as
 cluster jobs.
 
@@ -23,22 +23,25 @@ plt3d_pipeline/
     ├── 05_energy_spectrum.py            turbulence energy spectrum along periodic z   } needs 01
     ├── 06_plot_spectrum.py              plot script 05's output, save as PNG          } needs 05
     ├── 07_write_tecplot_terms.py        export 04's budget terms to Tecplot .dat      } needs 04
-    └── 08_plot_xy_slices.py             plot x-y slices (mean/TKE + instantaneous), PNGs } needs 01 (+02 for TKE)
+    ├── 08_plot_xy_slices.py             plot x-y slices (mean/TKE + instantaneous), PNGs } needs 01 (+02 for TKE)
+    └── 09_spectrum_monitors.py          1D spectra along periodic z at several points   } needs 01
 ```
 
 Every script accepts `--solution-dir <folder>` and processes **every**
 matching snapshot file in that folder itself — you never pass individual
 filenames. Point it at the directory, set `--workers`, submit.
 
-Scripts 02, 03, 05 and 08 each only depend on 01's mean fields and can be
-run in any order (or in parallel) once 01 has finished; 04 additionally
-needs 03's correlation output for the same reference point; 06 is a
-plotting step that only reads 05's `.npy` output (no snapshot files, no
-workers); 07 is a format-conversion step that only reads 04's `.npy`
-output (also no snapshot files, no workers); 08 is a plotting step that
-reads 01's mean fields plus one snapshot file (just one, not the whole
-`--solution-dir` loop every other snapshot-reading script does), and
-optionally 02's `TKE_t`/`TKE_tz` output too if requested. See "Running
+Scripts 02, 03, 05, 08 and 09 each only depend on 01's mean fields and
+can be run in any order (or in parallel) once 01 has finished; 04
+additionally needs 03's correlation output for the same reference point;
+06 is a plotting step that only reads 05's `.npy` output (no snapshot
+files, no workers); 07 is a format-conversion step that only reads 04's
+`.npy` output (also no snapshot files, no workers); 08 is a plotting
+step that reads 01's mean fields plus one snapshot file (just one, not
+the whole `--solution-dir` loop every other snapshot-reading script
+does), and optionally 02's `TKE_t`/`TKE_tz` output too if requested; 09
+is 05's `--mode point` generalized to several locations in one pass (and
+its output can be plotted directly with 06, unmodified). See "Running
 the full pipeline" below for the dependency chain.
 
 ---
@@ -573,6 +576,66 @@ python scripts/08_plot_xy_slices.py \
     --fields u v w T TKE_t TKE_tz
 ```
 
+### `scripts/09_spectrum_monitors.py` — 1D spectra at several monitoring points
+
+Computes the same local (point) energy spectrum as script 05's
+`--mode point` — along the periodic `z` direction, variance-conserving
+PSD — but for a **list** of `(x_idx, y_idx)` monitoring locations in one
+run, instead of one location per invocation. This is the local-spectrum
+analogue of the monitoring-point approach in Trias, Soria, Oliva &
+Pérez-Segarra's cavity study (several fixed `(x2, x3)` locations, each
+with its own `E(k1)`), adapted to this case's periodic-`z`
+convention.
+
+The reason this is a separate script rather than just looping script 05
+over locations yourself: script 05's point mode still FFTs the *entire*
+`(x, y)` plane for every snapshot and discards every column except the
+one requested, and calling it once per location re-reads (and
+re-transforms the whole plane for) every snapshot again per location.
+This script reads each snapshot **once**, slices out just the requested
+columns *before* FFT-ing (a length-`Nz` 1D transform per field per
+location, not a whole-plane one), and accumulates every location's
+spectrum in that same pass — so the cost doesn't multiply with the
+number of monitor points the way repeated script-05 calls would.
+
+Fluctuations are taken about `mean_tz` by default (same convention as
+script 05); pass `--use-3d-mean` for the raw `mean_t` instead.
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `--solution-dir` | yes | Folder containing `grid*.f` snapshots. |
+| `--grid-file` | yes | Path to `grid.xyz` — used for the z-spacing / physical wavenumbers. |
+| `--mean-dir` | yes | Directory with `mean_<field>_*.npy` from script 01. |
+| `--mean-tag` | no | Must match script 01's `--tag`. |
+| `--output-dir` | yes | **Parent** directory — results go to `<output-dir>/post-proc-9_spectrum_monitors/loc_<x>_<y>/` (one subfolder per location). |
+| `--locations` | yes | One or more monitor points as `x_idx,y_idx` (no spaces), e.g. `--locations 25,222 60,222 60,100`. |
+| `--fields` | no | One or more of `u v w T`. Default `u v w`. |
+| `--use-3d-mean` | no (flag) | Subtract the raw `mean_t` instead of `mean_tz`. |
+| `--workers` | no | Default `cpu_count() - 1`. |
+
+**Outputs**: for each location, `<output-dir>/post-proc-9_spectrum_monitors/loc_<x>_<y>/`
+containing `k.npy`, one `P_<field>.npy` per requested field, and (if
+`u`, `v`, `w` were all requested) `E_total.npy` — **identical filenames
+and format to script 05's point-mode output**, so `06_plot_spectrum.py`
+can plot any one location's result directly with no changes, just by
+pointing `--spectrum-dir` at that `loc_<x>_<y>/` subfolder:
+
+```bash
+python scripts/09_spectrum_monitors.py \
+    --solution-dir /path/to/Case/output \
+    --grid-file    /path/to/Case/output/grid.xyz \
+    --mean-dir     /path/to/post_proc_1-mean \
+    --mean-tag 731-931 \
+    --output-dir   /path/to \
+    --locations 25,222 60,222 60,100 \
+    --fields u v w T \
+    --workers 16
+
+python scripts/06_plot_spectrum.py \
+    --spectrum-dir /path/to/post-proc-9_spectrum_monitors/loc_25_222 \
+    --slope -1.6667
+```
+
 ---
 
 ## 4. Running the full pipeline
@@ -652,17 +715,32 @@ python scripts/08_plot_xy_slices.py \
     --solution-dir /path/to/Case/output \
     --output-dir   /path/to \
     --fields u v w T
+
+# 9. (optional) 1D energy spectra along periodic z at several monitoring
+#    (x,y) locations in one run -- only needs step 1, so (like steps 5
+#    and 8) this can run right after step 1 finishes:
+python scripts/09_spectrum_monitors.py \
+    --solution-dir /path/to/Case/output \
+    --grid-file    /path/to/Case/output/grid.xyz \
+    --mean-dir     /path/to/post_proc_1-mean \
+    --mean-tag 731-931 \
+    --output-dir   /path/to \
+    --locations 25,222 60,222 60,100 \
+    --fields u v w T \
+    --workers 16
 ```
 
 Each stage only depends on the `.npy` outputs of earlier stages (never on
 another stage's script or in-memory state), so you can submit them as
 separate, dependent Slurm/PBS jobs (`--dependency=afterok:<jobid>` or
-equivalent) instead of one long interactive run. Steps 2, 3, 5 and 8 each
-depend only on step 1 and are independent of each other; step 4 depends
-on step 1 and on step 3's output for the same reference point; step 6
-depends only on step 5; step 7 depends only on step 4 (and the same
+equivalent) instead of one long interactive run. Steps 2, 3, 5, 8 and 9
+each depend only on step 1 and are independent of each other; step 4
+depends on step 1 and on step 3's output for the same reference point;
+step 6 depends only on step 5 (or, equally, on step 9 — its output has
+the same filenames/format); step 7 depends only on step 4 (and the same
 reference point step 4 used); step 8 depends only on step 1 (optionally
-also on step 2's output, if `--fields` includes `TKE_t`/`TKE_tz`).
+also on step 2's output, if `--fields` includes `TKE_t`/`TKE_tz`); step 9
+depends only on step 1.
 
 ### Choosing `--x-idx` / `--y-idx` / `--z-idx`
 
