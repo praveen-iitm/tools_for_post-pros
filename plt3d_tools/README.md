@@ -415,10 +415,18 @@ sweeps back through the same slope value on the way out, which is an
 estimation artifact, not physics, and is deliberately excluded), prefers
 windows with a good power-law fit (R² ≥ 0.9) among the remaining
 candidates, and draws the dashed reference line through whichever of
-those has a fitted slope closest to `--slope`. The legend reports both
-where it landed and how good the match actually was, e.g.
-`k^-1.67  (near k≈9.7, fit k^-1.66, R²=0.99)` — a low reported R² is a
-signal the match isn't a clean power law, not a bug.
+those has a fitted slope closest to `--slope`, labeled with where it
+landed, e.g. `k^-1.67  (near k≈9.7)`.
+
+`k.npy` is physical (rad / length unit) by default. Pass `--normalize-k`
+to plot the dimensionless `k·(L/2)` some turbulence papers use instead
+(`L` being the periodic direction's domain length) — recovered directly
+from `k.npy`'s own bin spacing (`L = 2π / (k[1]-k[0])`), no grid file
+needed. This only rescales the x-axis for display: the `P(k)`/`E(k)`
+values are untouched, and since the `--slope` search works in log-log
+space, a constant rescaling of `k` doesn't change which window it
+matches — only the reported `k≈...` anchor (and the x-axis itself)
+changes accordingly.
 
 | Flag | Required | Meaning |
 |---|---|---|
@@ -427,6 +435,7 @@ signal the match isn't a clean power law, not a bug.
 | `--fields` | no | Which `P_<field>.npy` to plot (e.g. `u w`). Default: every `P_*.npy` found in `--spectrum-dir`. |
 | `--no-total` | no (flag) | Don't plot `E_total.npy` even if it's present. |
 | `--slope` | no | Overlay a dashed reference line of this log-log slope (e.g. `-1.6667` for Kolmogorov `-5/3`), positioned as described above. |
+| `--normalize-k` | no (flag) | Plot the dimensionless `k·(L/2)` instead of the physical `k`, as described above. |
 | `--title` | no | Plot title. Default: derived from `--spectrum-dir`'s folder name. |
 | `--dpi` | no | Default `150`. |
 
