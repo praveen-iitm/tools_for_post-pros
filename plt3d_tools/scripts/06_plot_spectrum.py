@@ -22,6 +22,15 @@ floor), and restricted to before the curve's steepest point, since a
 real inertial range can only occur before the dissipation-range roll-off
 and never in the flattening-back-out-of-noise tail after it.
 
+`k.npy` is physical (rad / length unit) by default. Pass --normalize-k
+to instead plot the dimensionless k*(L/2) some turbulence papers use
+(L being the periodic direction's domain length, recovered from k.npy's
+own spacing -- no grid file needed), so spectra from different domain
+sizes/resolutions sit on a directly comparable axis. This only rescales
+the x-axis for display; it doesn't change the P(k)/E(k) values or which
+window --slope matches (slope/R^2 in log-log space are invariant to a
+constant rescaling of k).
+
 Example
 -------
     # Plot everything script 05 wrote (plane-avg run)
@@ -35,6 +44,12 @@ Example
         --fields u w \
         --slope -1.6667 \
         --output /path/to/spectrum_5_25.png
+
+    # Same, with the dimensionless k*(L/2) x-axis
+    python 06_plot_spectrum.py \
+        --spectrum-dir /path/to/post_proc_5-spectrum_5_25 \
+        --slope -1.6667 \
+        --normalize-k
 """
 import argparse
 import glob
@@ -77,6 +92,10 @@ def main():
                      help="Draw a reference line of this slope (e.g. -1.6667 for -5/3) "
                           "in log-log space, positioned where the plotted spectrum's own "
                           "local slope is closest to this value.")
+    ap.add_argument('--normalize-k', action='store_true',
+                     help="Plot the dimensionless k*(L/2) instead of the physical k "
+                          "(rad/length unit), where L is the periodic direction's domain "
+                          "length, recovered from k.npy's own spacing.")
     ap.add_argument('--title', default=None, help="Plot title. Default: derived from --spectrum-dir.")
     ap.add_argument('--dpi', type=int, default=150)
     args = ap.parse_args()
@@ -85,6 +104,9 @@ def main():
     if not os.path.isfile(k_path):
         sys.exit(f"No k.npy found in {args.spectrum_dir} -- is this a script-05 output directory?")
     k = np.load(k_path)
+    if args.normalize_k and len(k) < 2:
+        sys.exit(f"k.npy in {args.spectrum_dir} has fewer than 2 entries -- "
+                  f"can't recover a bin spacing for --normalize-k.")
 
     fields = args.fields if args.fields is not None else _discover_fields(args.spectrum_dir)
     if not fields:
@@ -94,6 +116,22 @@ def main():
     # part of the fluctuation spectrum.
     mask = k > 0
     k_plot = k[mask]
+
+    if args.normalize_k:
+        # k.npy = 2*pi*rfftfreq(nz, d=dz) = (2*pi/Lz) * [0, 1, 2, ...], so
+        # the bin spacing dk = k[1]-k[0] (using the raw, unmasked k -- k[0]
+        # is the dropped DC bin) gives back Lz = 2*pi/dk with no grid file
+        # needed. Scaling k_plot itself (rather than bolting a separate
+        # "display k" array on top) means every downstream use below --
+        # the plotted curves, the slope-matching window search, and the
+        # reference line -- is automatically in the same normalized units,
+        # since they all read from k_plot.
+        dk = k[1] - k[0]
+        Lz = 2.0 * np.pi / dk
+        k_plot = k_plot * (Lz / 2.0)
+        x_label = "k (L/2)   (dimensionless)"
+    else:
+        x_label = "k  (rad / length unit)"
 
     fig, ax = plt.subplots(figsize=(7, 5))
     first_curve = None
@@ -202,7 +240,7 @@ def main():
         ax.loglog(k_ref, p_ref, 'k--', linewidth=1.2,
                   label=f"k^{args.slope:.3g}  (near k≈{k_anchor:.2g})")
 
-    ax.set_xlabel("k  (rad / length unit)")
+    ax.set_xlabel(x_label)
     ax.set_ylabel("P(k)")
     title = args.title
     if title is None:
