@@ -1,6 +1,7 @@
 # %%
 import os
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 
 from nob_tools import (
@@ -9,6 +10,7 @@ from nob_tools import (
     time_average_field,
     horizontal_profile,
     write_npy,
+    write_dat,
     write_profile_dat,
 )
 
@@ -21,12 +23,28 @@ COORD_CHECK_TOL = 1e-5        # how close X,Y,Z must be to the reference grid to
 Z_TOL = 1e-8                  # tolerance for treating two Z coordinates as the "same" level
 ITERS = None                  # None = process every iteration found; or e.g. [5231932, 5231933]
 
+# Outputs. Everything is written into OUTPUT_DIR, named with the variable and
+# the number of iterations averaged (n_accum):
+#   time_avg_<VAR>_<n>iters.npy   time-averaged field, X,Y,Z + <VAR>_mean   (always)
+#   time_avg_<VAR>_<n>iters.dat   same point cloud as Tecplot ASCII           (WRITE_FIELD_DAT)
+#   profile_<VAR>_z_<n>iters.dat  horizontally-averaged vertical profile      (always)
+#   profile_<VAR>_z_<n>iters.png  plot of that profile                        (SAVE_PLOT)
+WRITE_FIELD_DAT = True        # also write the time-averaged field as a Tecplot .dat point cloud.
+                              # ASCII, so it is large/slow for a big mesh -- set False to skip.
+SAVE_PLOT = True              # save the profile plot as a PNG in OUTPUT_DIR
+PLOT_DPI = 150
+SHOW_PLOT = False             # also open the plot interactively. Leave False on a cluster /
+                              # login node (no display) -- the PNG is saved either way.
+
 # Parallelism / RAM sizing -- None lets these auto-size from available RAM;
 # see nob_tools.memory_sizing.choose_worker_count for details.
 WORKERS = None
 MAX_RAM_GB = None
 SAFETY_FACTOR = 3.0
 RAM_MARGIN = 0.8
+
+if not SHOW_PLOT:
+    matplotlib.use("Agg")     # headless-safe: saving the PNG needs no display
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -71,6 +89,14 @@ avg_out_path = os.path.join(OUTPUT_DIR, f"time_avg_{AVG_VARIABLE}_{n_accum}iters
 write_npy(avg_out_path, avg_data, avg_var_names)
 print(f"Wrote time-averaged {AVG_VARIABLE} over {n_accum} iterations -> {avg_out_path}")
 
+if WRITE_FIELD_DAT:
+    # Same point cloud as the .npy above, as Tecplot ASCII (ordered F=POINT
+    # zone, no connectivity -- the same layout run_extract_variable.py writes
+    # for `--format dat --no-connectivity`).
+    avg_dat_path = os.path.join(OUTPUT_DIR, f"time_avg_{AVG_VARIABLE}_{n_accum}iters.dat")
+    write_dat(avg_dat_path, avg_data, None, avg_var_names)
+    print(f"Wrote time-averaged {AVG_VARIABLE} as Tecplot .dat ({avg_data.shape[0]:,} points) -> {avg_dat_path}")
+
 # %%
 # Horizontal (x,y) average -> vertical profile <T>(z). Groups points by Z
 # (within Z_TOL) and averages within each group -- see docstring for the
@@ -85,16 +111,27 @@ if len(z_levels) > 0.5 * xyz_ref.shape[0]:
           "the mesh may not share exact Z-levels. Consider binning by range instead.")
 
 # %%
-plt.figure(figsize=(5, 6))
-plt.plot(T_profile, z_levels, "o-", ms=3)
-plt.xlabel(f"$\\langle {AVG_VARIABLE} \\rangle_{{x,y}}$")
-plt.ylabel("Z")
-plt.title(f"Horizontally-averaged {AVG_VARIABLE} profile ({n_accum} iterations)")
-plt.grid(alpha=0.3)
-plt.tight_layout()
-plt.show()
-
-# %%
+# Written before the plot on purpose, so the profile data is on disk even if
+# plotting has a problem.
 profile_out_path = os.path.join(OUTPUT_DIR, f"profile_{AVG_VARIABLE}_z_{n_accum}iters.dat")
 write_profile_dat(profile_out_path, z_levels, T_profile, names=("Z", avg_var_name))
 print(f"Wrote vertical profile ({len(z_levels)} Z-levels) -> {profile_out_path}")
+
+# %%
+fig, ax = plt.subplots(figsize=(5, 6))
+ax.plot(T_profile, z_levels, "o-", ms=3)
+ax.set_xlabel(f"$\\langle {AVG_VARIABLE} \\rangle_{{x,y}}$")
+ax.set_ylabel("Z")
+ax.set_title(f"Horizontally-averaged {AVG_VARIABLE} profile ({n_accum} iterations)")
+ax.grid(alpha=0.3)
+fig.tight_layout()
+
+if SAVE_PLOT:
+    plot_out_path = os.path.join(OUTPUT_DIR, f"profile_{AVG_VARIABLE}_z_{n_accum}iters.png")
+    fig.savefig(plot_out_path, dpi=PLOT_DPI)
+    print(f"Saved profile plot -> {plot_out_path}")
+
+if SHOW_PLOT:
+    plt.show()
+else:
+    plt.close(fig)

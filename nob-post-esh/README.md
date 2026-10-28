@@ -260,6 +260,19 @@ If the printed duplicate count looks suspiciously low (near zero) or
 suspiciously high (a large fraction of every block), that's the first thing
 to check — try a different `--coord-tol` and compare.
 
+## Time-average driver
+
+`scripts/time_average_driver.py` is a `# %%` cell-style script (edit the config cell at the top, then run it or step through it in an IDE). It averages one variable over every iteration found, then writes into `OUTPUT_DIR` (names carry the variable and the number of iterations averaged, `<n>`):
+
+| File | Written when | Contents |
+|---|---|---|
+| `time_avg_<VAR>_<n>iters.npy` | always | time-averaged field: X, Y, Z, `<VAR>_mean` |
+| `time_avg_<VAR>_<n>iters.dat` | `WRITE_FIELD_DAT = True` | same point cloud as Tecplot ASCII (large/slow on big meshes) |
+| `profile_<VAR>_z_<n>iters.dat` | always | horizontally-averaged vertical profile |
+| `profile_<VAR>_z_<n>iters.png` | `SAVE_PLOT = True` | plot of that profile (`PLOT_DPI` sets resolution) |
+
+The plot is saved rather than shown by default (headless-safe for clusters); set `SHOW_PLOT = True` to also open it interactively.
+
 ## Other options
 
 | Flag | Default | Applies to | Purpose |
