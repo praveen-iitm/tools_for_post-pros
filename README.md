@@ -17,9 +17,9 @@ the repo and a quick-start pointer to the right tool.
 - **My solver writes Tecplot `.dat` files, one per partition per
   iteration, and I need to reassemble them** → `nob-post-esh/`. If you
   only need field values at point locations (e.g. for two-point spatial
-  correlations), use `run_extract_variable.py`; if you need the actual
+  correlations), use `scripts/01_extract_variable.py`; if you need the actual
   mesh connectivity (visualization, gradients via the FE mesh), use
-  `run_assemble_full.py`. See [`nob-post-esh/README.md`](nob-post-esh/README.md).
+  `scripts/02_assemble_full.py`. Time averages and mean profiles: `scripts/03_time_average.py`. See [`nob-post-esh/README.md`](nob-post-esh/README.md).
 
 - **My solver writes Plot3D binaries (`grid.xyz` + `grid<block>.<time>.f`)
   and I need statistics computed over the whole time series** →
@@ -34,13 +34,14 @@ tools_for_post-pros/
 ├── nob-post-esh/               Tecplot domain-decomposition reassembly
 │   ├── README.md
 │   ├── nob_tools/               shared library (discovery, io, dedup, writers, assemble)
-│   ├── run_extract_variable.py  single-variable point cloud (lightweight)
-│   └── run_assemble_full.py     full multi-variable mesh + connectivity
+│   └── scripts/                  01_extract_variable (point cloud) → 02_assemble_full (mesh) →
+│                                  03_time_average (mean field + vertical profile)
 └── plt3d_tools/                 Plot3D RBC statistics pipeline
     ├── README.md
     ├── plt_3d_tools/             shared library (io, gradients, plotting, parallel)
     └── scripts/                  01_compute_mean → 02_compute_fluctuations_tke →
-                                   03_two_point_correlation → 04_budget_terms
+                                   03_two_point_correlation → 04_budget_terms →
+                                   05–09 spectra, Tecplot output, slice plots
 ```
 
 ## Requirements
