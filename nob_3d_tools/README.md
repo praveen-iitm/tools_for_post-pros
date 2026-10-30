@@ -279,6 +279,18 @@ python scripts/03_time_average.py \
     --variable T --workers 12
 ```
 
+**Restartable and low-RAM.** Each iteration's assembled field is written to a
+checkpoint folder (`--checkpoint-dir`, default `<output-dir>/checkpoint_<VAR>/`)
+as soon as it is done, and nothing is accumulated in RAM while the job runs —
+the final mean is a streaming sum over those files. If the job dies (walltime,
+node failure), **rerun the same command**: iterations already checkpointed are
+skipped and only the unfinished ones are redone. Files are written atomically,
+so a half-written one is never mistaken for finished. You can also extend an
+average later (rerun with more iterations; only the new ones are computed).
+Disk cost is about N points × 4 bytes per iteration. `--no-resume` discards the
+checkpoint and starts over; `--clean-checkpoint` deletes it after a successful
+run (default: keep it).
+
 The plot is saved, not shown (headless-safe for clusters); add `--show` to also
 open it interactively. An iteration whose grid doesn't match the first one
 (within `--coord-check-tol`) aborts the run instead of corrupting the average.

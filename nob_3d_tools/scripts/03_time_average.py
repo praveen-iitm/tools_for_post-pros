@@ -13,6 +13,18 @@ number of iterations averaged (<n>):
     profile_<VAR>_z_<n>iters.dat  horizontally-averaged vertical profile     (always)
     profile_<VAR>_z_<n>iters.png  plot of that profile                       (unless --no-plot)
 
+Restartable, low-RAM: each iteration's assembled field is written to a
+checkpoint folder (default <output-dir>/checkpoint_<VAR>/) the moment it is
+done, and nothing is accumulated in RAM while the job runs -- the final mean
+is a streaming sum over those files. If the job is killed (walltime, node
+failure, Ctrl-C), just run the SAME command again: iterations already in the
+checkpoint folder are skipped and only the unfinished ones are redone. Files
+are written atomically, so a half-written one is never mistaken for done.
+The checkpoint also lets you extend an average later (rerun with more
+iterations and only the new ones are computed). Disk cost: about N points x
+4 bytes per iteration. Use --clean-checkpoint to delete it after a successful
+run, or --no-resume to throw it away and start over.
+
 The plot is saved, not shown (headless-safe for clusters); add --show to
 also open it interactively. The field .dat is ASCII, so it is large/slow on
 a big mesh -- pass --no-field-dat to skip it.
@@ -46,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from nob_tools import (
     ALL_VAR_NAMES,
     discover_iterations,
-    time_average_field,
+    time_average_field_checkpointed,
     horizontal_profile,
     write_npy,
     write_dat,
@@ -69,6 +81,14 @@ def main():
                     help="How close X,Y,Z must be to the reference grid to accept an iteration")
     ap.add_argument("--z-tol", type=float, default=1e-8,
                     help="Tolerance for treating two Z coordinates as the same level")
+    ap.add_argument("--checkpoint-dir", default=None,
+                    help="Where per-iteration results are kept for restarting "
+                         "(default: <output-dir>/checkpoint_<variable>)")
+    ap.add_argument("--no-resume", action="store_true",
+                    help="Ignore and delete existing checkpoint files; recompute every iteration")
+    ap.add_argument("--clean-checkpoint", action="store_true",
+                    help="Delete the checkpoint folder after a successful run "
+                         "(default: keep it, so a later rerun can extend the average)")
     ap.add_argument("--no-field-dat", action="store_true",
                     help="Skip the Tecplot .dat of the time-averaged field")
     ap.add_argument("--no-plot", action="store_true", help="Skip the profile PNG")
@@ -103,9 +123,11 @@ def main():
         print(f"  iter {it}: {len(blocks)} block(s)")
 
     # Expensive part (read + merge + dedup per iteration) runs in parallel,
-    # sized to available RAM -- see nob_tools/time_average.py.
-    xyz_ref, mean_field, n_accum, n_total = time_average_field(
-        by_iter, var_idx,
+    # sized to available RAM, with each result checkpointed to disk -- see
+    # nob_tools/time_average.py.
+    ckpt_dir = args.checkpoint_dir or os.path.join(args.output_dir, f"checkpoint_{var}")
+    xyz_ref, mean_field, n_accum, n_total = time_average_field_checkpointed(
+        by_iter, var_idx, ckpt_dir, resume=not args.no_resume,
         coord_tol=args.coord_tol, coord_check_tol=args.coord_check_tol,
         workers=args.workers, max_ram_gb=args.max_ram_gb,
         safety_factor=args.safety_factor, ram_margin=args.ram_margin,
@@ -140,6 +162,11 @@ def main():
     prof_path = os.path.join(args.output_dir, f"profile_{var}_z_{n_accum}iters.dat")
     write_profile_dat(prof_path, z_levels, profile, names=("Z", var_name))
     print(f"Wrote vertical profile ({len(z_levels)} Z-levels) -> {prof_path}")
+
+    if args.clean_checkpoint:
+        import shutil
+        shutil.rmtree(ckpt_dir, ignore_errors=True)
+        print(f"Removed checkpoint folder {ckpt_dir}")
 
     if not args.no_plot or args.show:
         fig, ax = plt.subplots(figsize=(5, 6))
