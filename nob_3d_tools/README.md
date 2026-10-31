@@ -268,7 +268,7 @@ number of iterations averaged (`<n>`):
 | File | Written when | Contents |
 |---|---|---|
 | `time_avg_<VAR>_<n>iters.npy` | always | time-averaged field: X, Y, Z, `<VAR>_mean` |
-| `time_avg_<VAR>_<n>iters.dat` | unless `--no-field-dat` | same point cloud as Tecplot ASCII (large/slow on big meshes) |
+| `time_avg_<VAR>_<n>iters.dat` | unless `--no-field-dat` | same field as Tecplot ASCII: a point cloud, or with `--with-connectivity` a `FETETRAHEDRON` mesh (large/slow on big meshes) |
 | `profile_<VAR>_z_<n>iters.dat` | always | horizontally-averaged vertical profile |
 | `profile_<VAR>_z_<n>iters.png` | unless `--no-plot` | plot of that profile (`--dpi`, default 150) |
 
@@ -290,6 +290,13 @@ average later (rerun with more iterations; only the new ones are computed).
 Disk cost is about N points × 4 bytes per iteration. `--no-resume` discards the
 checkpoint and starts over; `--clean-checkpoint` deletes it after a successful
 run (default: keep it).
+
+**Connectivity.** By default the field `.dat` is a bare point cloud (no
+elements). `--with-connectivity` writes it as a tetrahedral mesh you can
+contour in Tecplot/ParaView. The averaging never needs connectivity, so it is
+read once from the first iteration (one extra single-iteration read: more RAM
+and time than the point-cloud run), checked against the reference grid's node
+order, and cached in the checkpoint folder. The `.npy` is always a point cloud.
 
 The plot is saved, not shown (headless-safe for clusters); add `--show` to also
 open it interactively. An iteration whose grid doesn't match the first one

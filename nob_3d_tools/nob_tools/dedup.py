@@ -15,27 +15,39 @@ import time
 import numpy as np
 
 
-def _quantize_keys(coords, coord_tol):
+def _quantize_pair(coords1, coords2, coord_tol):
     """
-    Pack (N,3) float64 coordinates into a single sortable int64 key per
-    node, at resolution coord_tol. Falls back to a structured-dtype key
-    if the quantized range doesn't fit the fast 21-bit-per-axis packing
-    (this happens with very fine coord_tol relative to domain size --
-    loosen coord_tol if you see this fallback triggering on your data
-    and want the faster path).
+    Quantize two (N,3) coordinate sets to int64 grids at resolution
+    coord_tol and pack each node into one sortable key, using ONE shared
+    origin and ONE shared packing scheme for both sets -- required for the
+    keys of the two sets to be comparable at all. (Shifting each set by its
+    own minimum, as an earlier version did, makes the same physical point
+    get different keys in the two sets whenever their bounding boxes
+    differ, so duplicates were missed or wrongly matched.)
+
+    Uses fast 21-bit-per-axis packing when the combined quantized range
+    fits; otherwise falls back to a structured-dtype key (loosen
+    coord_tol if you see that fallback and want the faster path).
     """
     scale = 1.0 / coord_tol
-    q = np.round(coords * scale).astype(np.int64)
-    q -= q.min(axis=0, keepdims=True)
+    q1 = np.round(coords1 * scale).astype(np.int64)
+    q2 = np.round(coords2 * scale).astype(np.int64)
+    origin = np.minimum(q1.min(axis=0), q2.min(axis=0))
+    q1 -= origin
+    q2 -= origin
 
-    max_per_axis = q.max(axis=0)
-    bits_needed = int(np.ceil(np.log2(max_per_axis.max() + 1))) if max_per_axis.max() > 0 else 1
+    max_q = max(int(q1.max()), int(q2.max()))
+    bits_needed = int(np.ceil(np.log2(max_q + 1))) if max_q > 0 else 1
 
     if bits_needed > 21:
-        q_c = np.ascontiguousarray(q)
-        return q_c.view([("", q_c.dtype)] * 3).ravel()
+        def _struct(q):
+            q_c = np.ascontiguousarray(q)
+            return q_c.view([("", q_c.dtype)] * 3).ravel()
+        return _struct(q1), _struct(q2)
 
-    return (q[:, 0] << 42) | (q[:, 1] << 21) | q[:, 2]
+    def _pack(q):
+        return (q[:, 0] << 42) | (q[:, 1] << 21) | q[:, 2]
+    return _pack(q1), _pack(q2)
 
 
 def find_duplicates_by_hash(coords1, coords2, coord_tol=1e-6):
@@ -48,8 +60,7 @@ def find_duplicates_by_hash(coords1, coords2, coord_tol=1e-6):
         idx1_match : (N2,) int64, valid only where is_dup is True -- index
                      into coords1 of the matching node
     """
-    key1 = _quantize_keys(coords1, coord_tol)
-    key2 = _quantize_keys(coords2, coord_tol)
+    key1, key2 = _quantize_pair(coords1, coords2, coord_tol)
 
     order1 = np.argsort(key1, kind="mergesort")
     sorted_key1 = key1[order1]

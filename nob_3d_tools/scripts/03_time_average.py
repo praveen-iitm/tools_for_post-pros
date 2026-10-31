@@ -9,7 +9,9 @@ Everything is written into --output-dir, named with the variable and the
 number of iterations averaged (<n>):
 
     time_avg_<VAR>_<n>iters.npy   time-averaged field: X, Y, Z, <VAR>_mean  (always)
-    time_avg_<VAR>_<n>iters.dat   same point cloud as Tecplot ASCII          (unless --no-field-dat)
+    time_avg_<VAR>_<n>iters.dat   same field as Tecplot ASCII                (unless --no-field-dat);
+                                  a point cloud, or with --with-connectivity a
+                                  FETETRAHEDRON mesh you can contour in Tecplot/ParaView
     profile_<VAR>_z_<n>iters.dat  horizontally-averaged vertical profile     (always)
     profile_<VAR>_z_<n>iters.png  plot of that profile                       (unless --no-plot)
 
@@ -24,6 +26,13 @@ The checkpoint also lets you extend an average later (rerun with more
 iterations and only the new ones are computed). Disk cost: about N points x
 4 bytes per iteration. Use --clean-checkpoint to delete it after a successful
 run, or --no-resume to throw it away and start over.
+
+--with-connectivity adds the tetrahedral element connectivity to that .dat so
+it is a real mesh rather than bare points. The averaging never needs
+connectivity, so it is read once from the first iteration (an extra single-
+iteration read: more RAM and time than the point-cloud-only run) and cached
+in the checkpoint folder. It is checked against the reference grid's node
+order. The .npy output is always a point cloud.
 
 The plot is saved, not shown (headless-safe for clusters); add --show to
 also open it interactively. The field .dat is ASCII, so it is large/slow on
@@ -59,6 +68,7 @@ from nob_tools import (
     ALL_VAR_NAMES,
     discover_iterations,
     time_average_field_checkpointed,
+    reference_connectivity,
     horizontal_profile,
     write_npy,
     write_dat,
@@ -89,6 +99,9 @@ def main():
     ap.add_argument("--clean-checkpoint", action="store_true",
                     help="Delete the checkpoint folder after a successful run "
                          "(default: keep it, so a later rerun can extend the average)")
+    ap.add_argument("--with-connectivity", action="store_true",
+                    help="Write the field .dat as a FETETRAHEDRON mesh (with element connectivity) "
+                         "instead of a bare point cloud. Reads connectivity once from the first iteration.")
     ap.add_argument("--no-field-dat", action="store_true",
                     help="Skip the Tecplot .dat of the time-averaged field")
     ap.add_argument("--no-plot", action="store_true", help="Skip the profile PNG")
@@ -145,8 +158,17 @@ def main():
 
     if not args.no_field_dat:
         dat_path = os.path.join(args.output_dir, f"time_avg_{var}_{n_accum}iters.dat")
-        write_dat(dat_path, data, None, names)  # ordered F=POINT zone, no connectivity
-        print(f"Wrote time-averaged {var} as Tecplot .dat ({data.shape[0]:,} points) -> {dat_path}")
+        if args.with_connectivity:
+            conn = reference_connectivity(
+                by_iter, var_idx, ckpt_dir, xyz_ref, coord_tol=args.coord_tol,
+                coord_check_tol=args.coord_check_tol)
+            write_dat(dat_path, data, conn, names)  # FETETRAHEDRON zone
+            print(f"Wrote time-averaged {var} as Tecplot .dat mesh "
+                  f"({data.shape[0]:,} nodes, {conn.shape[0]:,} elements) -> {dat_path}")
+            del conn
+        else:
+            write_dat(dat_path, data, None, names)  # ordered F=POINT zone, no connectivity
+            print(f"Wrote time-averaged {var} as Tecplot .dat ({data.shape[0]:,} points) -> {dat_path}")
 
     # Horizontal (x,y) average -> <VAR>(z): groups points by Z (within z-tol)
     # and takes the arithmetic mean over points in each group.

@@ -230,13 +230,23 @@ def time_average_field_checkpointed(by_iter, var_idx, ckpt_dir, resume=True,
 
     def _wipe():
         for fn in os.listdir(ckpt_dir):
-            if fn.startswith("iter_") or fn in ("ref_xyz.npy", "meta.json"):
+            if fn.startswith("iter_") or fn in ("ref_xyz.npy", "meta.json", "ref_conn.npy"):
                 os.remove(os.path.join(ckpt_dir, fn))
 
     if not resume:
         _wipe()
 
     have_ref = os.path.isfile(ref_path) and os.path.isfile(meta_path)
+    if have_ref:
+        with open(meta_path) as f:
+            if not json.load(f).get("dedup_v2"):
+                # Written before the dedup shared-origin fix: its merged grid
+                # (and every iteration file built on it) can be wrong.
+                if verbose:
+                    print(f"Discarding old checkpoint in {ckpt_dir}: it predates a node-dedup bug "
+                          "fix and may contain wrongly merged grids. Recomputing.")
+                _wipe()
+                have_ref = False
     if not have_ref:
         # Iteration files without a verified reference grid can't be trusted.
         _wipe()
@@ -270,7 +280,7 @@ def time_average_field_checkpointed(by_iter, var_idx, ckpt_dir, resume=True,
         _save_atomic(_iter_path(ckpt_dir, first_it), field0.astype(node_dtype, copy=False))
         with open(meta_path, "w") as f:
             json.dump({"var_idx": var_idx, "n_points": int(xyz_ref.shape[0]),
-                       "coord_tol": coord_tol}, f)
+                       "coord_tol": coord_tol, "dedup_v2": True}, f)
         del field0
         gc.collect()
         if verbose:
@@ -319,6 +329,48 @@ def time_average_field_checkpointed(by_iter, var_idx, ckpt_dir, resume=True,
         del arr
     n_accum = len(items)
     return xyz_ref, (sum_field / n_accum).astype(np.float32), n_accum, n_accum
+
+
+def reference_connectivity(by_iter, var_idx, ckpt_dir, ref_xyz, coord_tol=1e-6,
+                           coord_check_tol=1e-5, node_dtype=np.float32,
+                           conn_dtype=np.int32, verbose=True):
+    """
+    0-based (E, 4) tetrahedral connectivity in the SAME node order as
+    ref_xyz, so it can be written alongside the time-averaged field.
+
+    The averaging itself never reads connectivity (it only needs node
+    values). This reads it once, from the first iteration in by_iter,
+    merging blocks exactly as the averaging did -- node order does not
+    depend on whether connectivity is carried, so it lines up with the
+    reference grid; that is verified against ref_xyz rather than assumed.
+    Cached as ckpt_dir/ref_conn.npy so a rerun doesn't redo it.
+    """
+    path = os.path.join(ckpt_dir, "ref_conn.npy")
+    if os.path.isfile(path):
+        conn = np.load(path)
+        if verbose:
+            print(f"Loaded cached connectivity ({conn.shape[0]:,} elements) from {path}")
+        return conn
+
+    it, blocks = next(iter(by_iter.items()))
+    if verbose:
+        print(f"Reading connectivity from iter {it} ({len(blocks)} block(s))...")
+    data, conn = assemble_iteration_variable(
+        blocks, var_idx, include_connectivity=True, coord_tol=coord_tol,
+        node_dtype=node_dtype, conn_dtype=conn_dtype, log_prefix=f"[iter {it}] ",
+    )
+    if data.shape[0] != ref_xyz.shape[0]:
+        raise ValueError(f"connectivity iteration has {data.shape[0]:,} nodes, reference grid has "
+                         f"{ref_xyz.shape[0]:,} -- can't attach connectivity to the averaged field.")
+    max_diff = float(np.abs(data[:, :3] - ref_xyz).max())
+    if max_diff > coord_check_tol:
+        raise ValueError(f"node order differs from the reference grid (max coord diff {max_diff:.3g}) "
+                         "-- can't attach connectivity to the averaged field.")
+    del data
+    conn = conn.astype(np.int64, copy=False)
+    _save_atomic(path, conn)
+    gc.collect()
+    return conn
 
 
 def horizontal_profile(xyz_ref, field_values, z_tol=1e-8):

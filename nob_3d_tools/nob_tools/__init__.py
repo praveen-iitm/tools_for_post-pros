@@ -24,6 +24,7 @@ from .time_average import (
     compute_reference_grid,
     time_average_field,
     time_average_field_checkpointed,
+    reference_connectivity,
     horizontal_profile,
     write_profile_dat,
 )
@@ -36,5 +37,5 @@ __all__ = [
     "write_npz", "write_npy", "write_dat", "write_tecplot",
     "assemble_iteration_full", "assemble_iteration_variable",
     "process_iteration_full", "process_iteration_variable",
-    "compute_reference_grid", "time_average_field", "time_average_field_checkpointed", "horizontal_profile", "write_profile_dat",
+    "compute_reference_grid", "time_average_field", "time_average_field_checkpointed", "reference_connectivity", "horizontal_profile", "write_profile_dat",
 ]
