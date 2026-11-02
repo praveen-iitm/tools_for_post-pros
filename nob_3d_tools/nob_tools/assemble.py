@@ -9,7 +9,7 @@ import os
 import gc
 import time
 
-from .io_tecplot import read_tecplot_partition, read_variable_partition
+from .io_tecplot import read_tecplot_partition, read_variable_partition, read_columns_partition
 from .dedup import merge_two, merge_partitions
 from .writers import write_npz, write_npy, write_dat
 from .discovery import ALL_VAR_NAMES
@@ -102,6 +102,38 @@ def assemble_iteration_variable(block_files, var_idx, include_connectivity, coor
         data_acc, conn_acc = new_data_acc, new_conn_acc
 
     print(f"{log_prefix}assemble_iteration_variable total: {time.perf_counter() - t_start:.1f}s", flush=True)
+    return data_acc, conn_acc
+
+
+def assemble_iteration_columns(block_files, col_idxs, include_connectivity, coord_tol,
+                               node_dtype, conn_dtype, log_prefix=""):
+    """
+    Like assemble_iteration_variable, but keeps X,Y,Z + several variables.
+    Output columns: X, Y, Z, then col_idxs in the order given (entries
+    0/1/2 are not repeated). Node order after merging does not depend on
+    which columns or whether connectivity is carried, so results line up
+    with assemble_iteration_variable's node order.
+    """
+    t_start = time.perf_counter()
+    blk0, fp0 = block_files[0]
+    print(f"{log_prefix}reading block {blk0}: {os.path.basename(fp0)}", flush=True)
+    data_acc, conn_local = read_columns_partition(fp0, col_idxs, include_connectivity,
+                                                    node_dtype, conn_dtype, log_prefix)
+    conn_acc = (conn_local.astype("int64") - 1) if include_connectivity else None
+    del conn_local
+
+    for blk, fp in block_files[1:]:
+        print(f"{log_prefix}reading block {blk}: {os.path.basename(fp)}", flush=True)
+        data_i, conn_i = read_columns_partition(fp, col_idxs, include_connectivity,
+                                                  node_dtype, conn_dtype, log_prefix)
+        new_data_acc, new_conn_acc, n_dup = merge_two(
+            data_acc, conn_acc, data_i, conn_i, coord_tol, include_connectivity, log_prefix
+        )
+        del data_acc, conn_acc, data_i, conn_i
+        gc.collect()
+        data_acc, conn_acc = new_data_acc, new_conn_acc
+
+    print(f"{log_prefix}assemble_iteration_columns total: {time.perf_counter() - t_start:.1f}s", flush=True)
     return data_acc, conn_acc
 
 

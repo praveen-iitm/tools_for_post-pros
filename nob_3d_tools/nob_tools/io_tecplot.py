@@ -113,3 +113,54 @@ def read_variable_partition(filename, var_idx, include_connectivity,
 
     assert data.shape[0] == N, f"{filename}: data row count mismatch {data.shape[0]} != {N}"
     return data, conn
+
+
+def read_columns_partition(filename, col_idxs, include_connectivity,
+                           node_dtype=np.float32, conn_dtype=np.int32, log_prefix=""):
+    """
+    Read X,Y,Z + several chosen variables (by column index) of one
+    partition, via pandas usecols so unrequested columns are never parsed.
+    Generalises read_variable_partition to more than one variable.
+
+    Returns:
+        data : (N, 3 + len(extra)) array -- X,Y,Z then the requested
+               columns in the order given (any of 0/1/2 in col_idxs are
+               not duplicated).
+        conn : (E, 4) array (1-based, local), or None if include_connectivity=False
+    """
+    n_vars, N, E = parse_tecplot_header(filename)
+    for c in col_idxs:
+        if not (0 <= c < n_vars):
+            raise ValueError(f"column index {c} out of range for {filename} (file has {n_vars} variables)")
+
+    extra = [c for c in col_idxs if c not in (0, 1, 2)]
+    cols = sorted(set([0, 1, 2] + extra))
+
+    t0 = time.perf_counter()
+    df = pd.read_csv(
+        filename, sep=r"\s+", header=None,
+        skiprows=3, nrows=N,
+        usecols=cols, dtype=node_dtype,
+        engine="c", memory_map=True,
+    )
+    data = df[[0, 1, 2] + extra].to_numpy(copy=False)
+    del df
+    gc.collect()
+    t1 = time.perf_counter()
+    print(f"{log_prefix}  read fields ({len(cols)} cols, {N:,} rows): {t1 - t0:.1f}s", flush=True)
+
+    conn = None
+    if include_connectivity:
+        conn_df = pd.read_csv(
+            filename, sep=r"\s+", header=None,
+            skiprows=3 + N, nrows=E,
+            dtype=conn_dtype, engine="c", memory_map=True,
+        )
+        conn = conn_df.to_numpy(copy=False)
+        del conn_df
+        gc.collect()
+        assert conn.shape[0] == E, f"{filename}: connectivity row count mismatch"
+        print(f"{log_prefix}  read connectivity ({E:,} rows): {time.perf_counter() - t1:.1f}s", flush=True)
+
+    assert data.shape[0] == N, f"{filename}: data row count mismatch {data.shape[0]} != {N}"
+    return data, conn

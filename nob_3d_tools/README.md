@@ -11,6 +11,7 @@ run from any working directory:
 | `scripts/01_extract_variable.py` | One variable (+X,Y,Z), no connectivity, per iteration | Point-based analysis (e.g. two-point spatial correlations) — **this is what you want for the RBC correlation work** |
 | `scripts/02_assemble_full.py` | All 13 variables + full FE connectivity, per iteration | Visualization in Tecplot/ParaView, or anything that needs the actual mesh structure |
 | `scripts/03_time_average.py` | Time-averaged field (`.npy` + Tecplot `.dat`), horizontally-averaged vertical profile (`.dat` + `.png`) | Mean profiles, e.g. `<T>(z)` |
+| `scripts/04_nusselt.py` | Nu at the hot wall, cold wall, bulk (single values, `.npy`) and the Nu(z) profile (`.dat`) | Comparing with the NOB Nusselt-number results of Wang et al., JFM 2020 |
 
 If you're not sure which you need: if your analysis only needs field values
 at point locations and not the tetrahedral mesh connectivity, use
@@ -28,6 +29,7 @@ nob-post-esh/
     01_extract_variable.py
     02_assemble_full.py
     03_time_average.py
+    04_nusselt.py
 ```
 
 Requires: `numpy`, `pandas`, `psutil` (optional but recommended — needed for
@@ -303,6 +305,67 @@ open it interactively. An iteration whose grid doesn't match the first one
 (within `--coord-check-tol`) aborts the run instead of corrupting the average.
 Other flags: `--iters`, `--z-tol` (what counts as the same Z level), `--pattern`,
 `--coord-tol`, `--max-ram-gb`, `--safety-factor`, `--ram-margin`.
+
+## `scripts/04_nusselt.py` — Nusselt numbers (hot wall, cold wall, bulk, Nu(z))
+
+Computes Nusselt numbers from the raw partition files for comparison with
+Wang, Wan, Yan & Sun, JFM (2020), doi:10.1017/jfm.2020.66, who define
+`Nu = Q / (k·2ε/H)` with Q the heat flux across a horizontal plane. Z is the
+vertical direction; the hotter wall is detected automatically. In the solver's
+units the flux on the plane at height z is
+
+```
+Q(z) = Pe · <ρ cp w (T − T_ref)>  −  <κ ∂T/∂z>        Nu = Q / (k_ref · ΔT / H)
+```
+
+(`< >` = mean over the nodes of that Z level and over iterations). The time
+average is taken **on the product, per iteration** — the convective flux is
+almost entirely a fluctuation correlation, so it cannot be built from
+time-averaged fields. Fields read: `W, T, rho, cp, kappa`.
+
+```bash
+python scripts/04_nusselt.py \
+    --input-dir  /data/praveen/nob_rbc_air_3d/dati \
+    --output-dir /data/praveen/nob_rbc_air_3d/nusselt \
+    --ra 1e8 --pr 0.71 --epsilon 0.1 --workers 12
+```
+
+**You must give the Péclet number** (`--pe`, or `--ra` and `--pr`), because it
+depends on how your solver is nondimensionalised: `Pe = U_ref·H/κ_ref`, i.e.
+`--pe 1` for thermal-diffusion velocity scaling, or `sqrt(Ra·Pr)` for
+free-fall scaling. Q is the same on every plane of a statistically steady
+closed cell, so **Nu(z) should be flat**: the script prints its relative spread
+and warns above 5%. A wrong Pe, too few iterations, or a poor wall gradient all
+show up there.
+
+| Output | Contents |
+|---|---|
+| `Nu_hot.npy`, `Nu_cold.npy` | conductive flux at the hot / cold wall, normalised (no-slip, so no convective part there) |
+| `Nu_bulk.npy` | volume average of Nu(z), the integral of Nu dz over `--bulk-range` (fractions of H, default the whole height; e.g. `0.1 0.9` drops the wall layers) |
+| `Nu_profile.dat` | Tecplot ASCII, columns `Z, Nu, Nu_conv, Nu_cond, T_mean` |
+| `Nu_summary.txt`, `Nu_profile.png` | all numbers and settings used; plot of Nu(z) and its parts |
+
+The `.npy` single values are 0-d arrays: `float(np.load("Nu_hot.npy"))`.
+
+**Normalisation.** `ΔT` = |T(bottom wall) − T(top wall)| from the data, or
+`--delta-T`, or `--epsilon` (ΔT = 2ε when T is scaled by T0); `H` = Z extent
+(`--H`); `--k-ref` = reference conductivity in solver units (default 1).
+
+**Gradient dT/dz** (`--mode auto|columns|fe`). `columns`: the mesh has shared Z
+levels and the same (x,y) points on every level; second-order non-uniform finite
+differences along each column, including one-sided stencils at the walls.
+`fe`: per-tetrahedron gradients from the connectivity, volume-averaged onto
+nodes; works on any mesh, but the wall gradient is only first-order accurate.
+`auto` (default) uses `columns` if the mesh allows it. Both need shared Z levels
+for the horizontal averaging, and use plain arithmetic means over nodes (see the
+caveat on non-uniform horizontal meshes in the time-average section).
+
+Like script 03 it is **restartable and low-RAM**: each iteration is reduced to a
+few small arrays in `<output-dir>/checkpoint_Nu/` as soon as it is done, and a
+rerun of the same command skips finished iterations (`--no-resume`,
+`--clean-checkpoint`, `--checkpoint-dir`). Files are read in float64 by default
+(`--node-dtype float32` halves memory) because gradients over closely spaced
+wall levels amplify float32 round-off.
 
 ## Other options
 
