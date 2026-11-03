@@ -53,6 +53,9 @@ from .time_average import reference_connectivity, _save_atomic
 
 COL_NAMES = ("W", "T", "rho", "cp", "kappa")
 COLS = [ALL_VAR_NAMES.index(n) for n in COL_NAMES]   # data columns 3..7 after X,Y,Z
+# extra columns, only read when the dissipation-based Nu_V is requested
+# (data columns 8, 9, 10): U, V and the dynamic viscosity
+COLS_DISS = [ALL_VAR_NAMES.index(n) for n in ("U", "V", "mu")]
 T_VAR_IDX = ALL_VAR_NAMES.index("T")
 
 
@@ -119,17 +122,20 @@ def fd_z(Tg, z):
     return d
 
 
-def build_fe_operator(xyz, conn, chunk=2_000_000):
+def build_fe_operator(xyz, conn, chunk=2_000_000, full=False):
     """
     Precompute what is needed to get a node-based dT/dz from a node field T
     on a tetrahedral mesh: per-element z-gradient coefficients `a` (E,3)
     such that dT/dz|_e = a . (T1-T0, T2-T0, T3-T0), element volumes, and
-    each node's summed adjacent volume. conn is 0-based (E,4).
+    each node's summed adjacent volume. conn is 0-based (E,4). With
+    full=True the whole inverse edge matrix Dinv (E,3,3) is kept too, which
+    gives all three gradient components (needed for the dissipation).
     """
     N, E = xyz.shape[0], conn.shape[0]
     x = xyz.astype(np.float64, copy=False)
     a = np.empty((E, 3), dtype=np.float64)
     vol = np.empty(E, dtype=np.float64)
+    Dinv_all = np.empty((E, 3, 3), dtype=np.float64) if full else None
     for s in range(0, E, chunk):
         c = conn[s:s + chunk]
         p0 = x[c[:, 0]]
@@ -137,12 +143,46 @@ def build_fe_operator(xyz, conn, chunk=2_000_000):
         det = np.linalg.det(D)
         if (det == 0).any():
             raise ValueError("degenerate (zero-volume) tetrahedron in connectivity")
-        a[s:s + chunk] = np.linalg.inv(D)[:, 2, :]          # g_z = Dinv[2,:] . dT
+        Dinv = np.linalg.inv(D)
+        a[s:s + chunk] = Dinv[:, 2, :]                      # g_z = Dinv[2,:] . dT
+        if full:
+            Dinv_all[s:s + chunk] = Dinv
         vol[s:s + chunk] = np.abs(det) / 6.0
     node_vol = np.zeros(N, dtype=np.float64)
     for j in range(4):
         node_vol += np.bincount(conn[:, j], weights=vol, minlength=N)
-    return {"conn": conn, "a": a, "vol": vol, "node_vol": node_vol, "n_nodes": N}
+    return {"conn": conn, "a": a, "vol": vol, "node_vol": node_vol, "n_nodes": N, "Dinv": Dinv_all}
+
+
+def viscous_dissipation(U, V, W, mu, op, chunk=1_000_000):
+    """
+    Volume average of the viscous dissipation per unit volume
+
+        Phi = mu * [ d_i u_j (d_i u_j + d_j u_i)  -  (2/3) (div u)^2 ]
+
+    with piecewise-constant per-tetrahedron gradients (exact for linear
+    fields) and mu taken as the mean of the element's 4 nodal values;
+    weights are the element volumes. For constant mu and div u = 0 this is
+    mu * <(d_i u_j)^2>, since the d_i u_j d_j u_i part integrates to zero
+    with no-slip/periodic boundaries. Needs an operator built with full=True.
+    """
+    if op.get("Dinv") is None:
+        raise ValueError("operator was built without the full gradient (full=True)")
+    c, Dinv, vol = op["conn"], op["Dinv"], op["vol"]
+    tot = 0.0
+    for s0 in range(0, c.shape[0], chunk):
+        cc, Dm = c[s0:s0 + chunk], Dinv[s0:s0 + chunk]
+
+        def diffs(F):
+            f0 = F[cc[:, 0]]
+            return np.stack([F[cc[:, 1]] - f0, F[cc[:, 2]] - f0, F[cc[:, 3]] - f0], axis=1)
+
+        G = np.stack([np.einsum("eik,ek->ei", Dm, diffs(F)) for F in (U, V, W)], axis=2)  # G[e,i,j]=d_i u_j
+        s2 = np.einsum("eij,eij->e", G, G) + np.einsum("eij,eji->e", G, G)
+        div = G[:, 0, 0] + G[:, 1, 1] + G[:, 2, 2]
+        mu_e = 0.25 * (mu[cc[:, 0]] + mu[cc[:, 1]] + mu[cc[:, 2]] + mu[cc[:, 3]])
+        tot += float(np.sum(vol[s0:s0 + chunk] * mu_e * (s2 - (2.0 / 3.0) * div ** 2)))
+    return tot / float(vol.sum())
 
 
 def grad_z_fe(T, op):
@@ -165,11 +205,14 @@ def grad_z_fe(T, op):
 def level_stats(data, ctx):
     """
     data: (N, 8) = X,Y,Z,W,T,rho,cp,kappa in reference node order.
-    Returns (conv, cond, Tm), each (L,): level means of rho*cp*w*(T-T_ref),
-    kappa*dT/dz, and T.
+    Returns (conv, cond, Tm, mflux, diss): the first four are (L,) level
+    means of rho*cp*w*(T-T_ref), kappa*dT/dz, T, and rho*cp*w (the mass-flux
+    diagnostic: ~0 in a stationary closed cell); diss is the volume-averaged
+    viscous dissipation (a float) when ctx["diss"] is on, else None.
     """
     w, T, rho, cp, kap = (data[:, 3 + i].astype(np.float64) for i in range(5))
-    conv_n = rho * cp * w * (T - ctx["t_ref"])
+    mf_n = rho * cp * w
+    conv_n = mf_n * (T - ctx["t_ref"])
     if ctx["mode"] == "columns":
         idx = ctx["col_idx"]
         Tg = T[idx]
@@ -177,13 +220,19 @@ def level_stats(data, ctx):
         cond = (kap[idx] * dT).mean(axis=1)
         conv = conv_n[idx].mean(axis=1)
         Tm = Tg.mean(axis=1)
+        mflux = mf_n[idx].mean(axis=1)
     else:
         g = grad_z_fe(T, ctx["fe"])
         lv, cnt, L = ctx["level_idx"], ctx["counts"], len(ctx["counts"])
         cond = np.bincount(lv, weights=kap * g, minlength=L) / cnt
         conv = np.bincount(lv, weights=conv_n, minlength=L) / cnt
         Tm = np.bincount(lv, weights=T, minlength=L) / cnt
-    return conv, cond, Tm
+        mflux = np.bincount(lv, weights=mf_n, minlength=L) / cnt
+    diss = None
+    if ctx.get("diss"):
+        U, V, mu = (data[:, 8 + i].astype(np.float64) for i in range(3))
+        diss = viscous_dissipation(U, V, w, mu, ctx["fe"])
+    return conv, cond, Tm, mflux, diss
 
 
 _CTX = None  # set once per worker process via the pool initializer
@@ -198,9 +247,10 @@ def _iter_path(ckpt_dir, it):
     return os.path.join(ckpt_dir, f"iter_{it}.npz")
 
 
-def _save_iter(path, conv, cond, Tm):
+def _save_iter(path, conv, cond, Tm, mflux, diss=None):
     tmp = path[:-4] + ".tmp.npz"
-    np.savez(tmp, conv=conv, cond=cond, Tm=Tm)
+    extra = {} if diss is None else {"diss": np.float64(diss)}
+    np.savez(tmp, conv=conv, cond=cond, Tm=Tm, mflux=mflux, **extra)
     os.replace(tmp, path)
 
 
@@ -208,7 +258,7 @@ def _process_iteration(it, blocks, coord_tol, node_dtype, coord_check_tol, out_p
     """Worker: read+merge one iteration, check its grid, reduce, save."""
     try:
         data, _ = assemble_iteration_columns(
-            blocks, COLS, False, coord_tol, node_dtype, np.int32, log_prefix=f"[iter {it}] ")
+            blocks, _CTX["cols"], False, coord_tol, node_dtype, np.int32, log_prefix=f"[iter {it}] ")
         ref = _CTX["xyz_ref"]
         if data.shape[0] != ref.shape[0]:
             return {"iter": it, "status": "error",
@@ -218,23 +268,23 @@ def _process_iteration(it, blocks, coord_tol, node_dtype, coord_check_tol, out_p
             return {"iter": it, "status": "error",
                     "error": f"coordinates differ from the reference grid by up to {max_diff:.3g} "
                              f"(tolerance {coord_check_tol:.3g})"}
-        conv, cond, Tm = level_stats(data, _CTX)
+        conv, cond, Tm, mflux, diss = level_stats(data, _CTX)
         del data
         gc.collect()
-        _save_iter(out_path, conv, cond, Tm)
+        _save_iter(out_path, conv, cond, Tm, mflux, diss)
         return {"iter": it, "status": "ok"}
     except Exception as e:
         return {"iter": it, "status": "error", "error": str(e)}
 
 
-def _make_ctx(xyz_ref, layout, mode, t_ref, fe=None):
-    ctx = {"xyz_ref": xyz_ref, "mode": mode, "t_ref": float(t_ref),
+def _make_ctx(xyz_ref, layout, mode, t_ref, fe=None, cols=None, diss=False):
+    ctx = {"xyz_ref": xyz_ref, "mode": mode, "t_ref": float(t_ref), "cols": cols or COLS, "diss": diss,
            "z_levels": layout["z_levels"], "level_idx": layout["level_idx"],
            "counts": layout["counts"], "col_idx": layout["col_idx"], "fe": fe}
     return ctx
 
 
-def compute_level_means(by_iter, ckpt_dir, resume=True, mode="auto", t_ref=None,
+def compute_level_means(by_iter, ckpt_dir, resume=True, mode="auto", t_ref=None, dissipation=False,
                         coord_tol=1e-6, coord_check_tol=1e-5, z_tol=1e-8, xy_tol=1e-6,
                         node_dtype=np.float64, workers=None, max_ram_gb=None,
                         safety_factor=4.0, ram_margin=0.8, verbose=True):
@@ -243,7 +293,9 @@ def compute_level_means(by_iter, ckpt_dir, resume=True, mode="auto", t_ref=None,
     conductive term kappa*dT/dz and T, restartably (see module docstring).
 
     Returns dict: z_levels, conv, cond, Tm (all (L,)), n_accum, mode,
-    t_ref, n_points.
+    t_ref, n_points, the per-iteration arrays and, if dissipation=True,
+    diss / diss_it (volume-averaged viscous dissipation; this needs the
+    connectivity and also reads U, V and mu).
     """
     items = list(by_iter.items())
     if not items:
@@ -274,12 +326,16 @@ def compute_level_means(by_iter, ckpt_dir, resume=True, mode="auto", t_ref=None,
         elif mode != "auto" and meta["mode"] != mode:
             raise ValueError(f"checkpoint in {ckpt_dir} was made with --mode {meta['mode']}, "
                              f"not {mode}. Use --no-resume to start over.")
+        elif dissipation and not meta.get("dissipation"):
+            raise ValueError(f"checkpoint in {ckpt_dir} was made without the dissipation columns; "
+                             "use --no-resume (or a different --checkpoint-dir) to add --nu-v.")
         elif t_ref is not None and abs(meta["t_ref"] - t_ref) > 1e-12:
             raise ValueError(f"checkpoint in {ckpt_dir} used t_ref={meta['t_ref']}, not {t_ref}. "
                              "Use --no-resume to start over.")
     if not have_ref:
         _wipe()
 
+    cols_used = COLS + (COLS_DISS if dissipation else [])
     first_data = None
     if have_ref:
         xyz_ref = np.load(ref_path)
@@ -294,7 +350,7 @@ def compute_level_means(by_iter, ckpt_dir, resume=True, mode="auto", t_ref=None,
         if verbose:
             print(f"Computing reference grid from iter {first_it} ({len(first_blocks)} block(s))...")
         first_data, _ = assemble_iteration_columns(
-            first_blocks, COLS, False, coord_tol, node_dtype, np.int32,
+            first_blocks, cols_used, False, coord_tol, node_dtype, np.int32,
             log_prefix=f"[iter {first_it}] ")
         xyz_ref = first_data[:, :3].copy()
         layout = detect_layout(xyz_ref, z_tol, xy_tol)
@@ -321,20 +377,22 @@ def compute_level_means(by_iter, ckpt_dir, resume=True, mode="auto", t_ref=None,
                   f"mode={mode_used}, T_ref={t_ref_used:.8g}")
 
     fe = None
-    if mode_used == "fe":
+    if mode_used == "fe" or dissipation:
         conn = reference_connectivity(by_iter, T_VAR_IDX, ckpt_dir, xyz_ref, coord_tol=coord_tol,
                                       coord_check_tol=coord_check_tol, node_dtype=node_dtype,
                                       verbose=verbose)
-        fe = build_fe_operator(xyz_ref, conn.astype(np.int32 if conn.max() < 2**31 else np.int64))
+        fe = build_fe_operator(xyz_ref, conn.astype(np.int32 if conn.max() < 2**31 else np.int64),
+                               full=dissipation)
         del conn
-    ctx = _make_ctx(xyz_ref, layout, mode_used, t_ref_used, fe)
+    ctx = _make_ctx(xyz_ref, layout, mode_used, t_ref_used, fe, cols=cols_used, diss=dissipation)
 
     if first_data is not None:
-        conv, cond, Tm = level_stats(first_data, ctx)
-        _save_iter(_iter_path(ckpt_dir, items[0][0]), conv, cond, Tm)
+        conv, cond, Tm, mflux, diss = level_stats(first_data, ctx)
+        _save_iter(_iter_path(ckpt_dir, items[0][0]), conv, cond, Tm, mflux, diss)
         np.save(ref_path, xyz_ref)
         with open(meta_path, "w") as f:
             json.dump({"kind": "nusselt", "dedup_v2": True, "mode": mode_used,
+                       "dissipation": bool(dissipation),
                        "t_ref": t_ref_used, "n_points": int(xyz_ref.shape[0]),
                        "coord_tol": coord_tol}, f)
         del first_data
@@ -343,7 +401,7 @@ def compute_level_means(by_iter, ckpt_dir, resume=True, mode="auto", t_ref=None,
     pending = [(it, b) for it, b in items if not os.path.isfile(_iter_path(ckpt_dir, it))]
     if pending:
         n_workers = choose_worker_count(
-            dict(pending), n_cols=3 + len(COLS), include_connectivity=False,
+            dict(pending), n_cols=3 + len(cols_used), include_connectivity=False,
             requested_workers=workers, max_ram_gb=max_ram_gb,
             # the sizer assumes 4-byte values; scale for float64
             safety_factor=safety_factor * np.dtype(node_dtype).itemsize / 4.0,
@@ -370,17 +428,28 @@ def compute_level_means(by_iter, ckpt_dir, resume=True, mode="auto", t_ref=None,
         print("Nothing pending -- all iterations already checkpointed.")
 
     L = layout["n_levels"]
-    s_conv, s_cond, s_Tm = np.zeros(L), np.zeros(L), np.zeros(L)
+    conv_it, cond_it, Tm_it, mf_it, diss_it = [], [], [], [], []
     for it, _ in items:
         with np.load(_iter_path(ckpt_dir, it)) as f:
             if f["conv"].shape != (L,):
                 raise ValueError(f"{_iter_path(ckpt_dir, it)} has the wrong size; use --no-resume.")
-            s_conv += f["conv"]
-            s_cond += f["cond"]
-            s_Tm += f["Tm"]
-    n = len(items)
-    return {"z_levels": layout["z_levels"], "conv": s_conv / n, "cond": s_cond / n, "Tm": s_Tm / n,
-            "n_accum": n, "mode": mode_used, "t_ref": t_ref_used, "n_points": int(xyz_ref.shape[0])}
+            conv_it.append(f["conv"]); cond_it.append(f["cond"]); Tm_it.append(f["Tm"])
+            mf_it.append(f["mflux"] if "mflux" in f.files else None)
+            if dissipation:
+                if "diss" not in f.files:
+                    raise ValueError(f"{_iter_path(ckpt_dir, it)} has no dissipation value; "
+                                     "use --no-resume (or a different --checkpoint-dir) to add --nu-v.")
+                diss_it.append(float(f["diss"]))
+    conv_it, cond_it, Tm_it = np.array(conv_it), np.array(cond_it), np.array(Tm_it)
+    # mass-flux diagnostic only if every iteration has it (older checkpoints don't)
+    mf_it = np.array(mf_it) if all(m is not None for m in mf_it) else None
+    return {"z_levels": layout["z_levels"], "conv": conv_it.mean(0), "cond": cond_it.mean(0),
+            "Tm": Tm_it.mean(0), "mflux": None if mf_it is None else mf_it.mean(0),
+            "iters": [it for it, _ in items], "conv_it": conv_it, "cond_it": cond_it,
+            "Tm_it": Tm_it, "n_accum": len(items), "mode": mode_used, "t_ref": t_ref_used,
+            "n_points": int(xyz_ref.shape[0]), "xy_spacing": xy_spacing_info(xyz_ref, layout),
+            "diss_it": np.array(diss_it) if dissipation else None,
+            "diss": float(np.mean(diss_it)) if dissipation else None}
 
 
 # --------------------------------------------------------------------------
@@ -430,6 +499,99 @@ def nusselt_from_levels(z, conv, cond, Tm, pe, k_ref=1.0, delta_T=None, H=None,
         "Nu_hot": -sgn * cond[hot] / den, "Nu_cold": -sgn * cond[cold] / den,
         "Nu_bulk": Nu_bulk, "Nu_z": Nu_z, "Nu_conv_z": Nu_conv_z, "Nu_cond_z": Nu_cond_z,
         "hot_at": "bottom" if sgn > 0 else "top", "delta_T": dT, "H": H, "k_ref": k_ref,
-        "pe": pe, "bulk_z_range": (float(zb[0]), float(zb[-1])),
+        "pe": pe, "bulk_z_range": (float(zb[0]), float(zb[-1])), "bulk_range": tuple(bulk_range),
         "rel_spread": float((Nu_z.max() - Nu_z.min()) / abs(Nu_z.mean())),
     }
+
+
+def xy_spacing_info(xyz, layout):
+    """
+    For a column structure on a tensor-product (x,y) grid: max/min spacing
+    ratio along x and along y. 1.0 = uniform. The plain arithmetic mean over
+    nodes used for every horizontal average is only an area average if the
+    horizontal spacing is uniform. Returns None when not applicable.
+    """
+    if layout["col_idx"] is None:
+        return None
+    lvl0 = xyz[layout["col_idx"][0]]
+    out = {}
+    for name, c in (("dx", lvl0[:, 0]), ("dy", lvl0[:, 1])):
+        u = np.unique(np.round(c, 10))
+        out["n_" + name[1]] = len(u)
+        out[name + "_ratio"] = float(np.diff(u).max() / np.diff(u).min()) if len(u) > 2 else 1.0
+    if out["n_x"] * out["n_y"] != lvl0.shape[0]:
+        return None          # not a tensor-product grid
+    return out
+
+
+def pe_self_check(Nu_conv_z, Nu_cond_z, z):
+    """
+    Energy conservation says Q = Pe*conv - cond is the same on every plane,
+    i.e. Nu_cond(z) = Q - f*Nu_conv(z) with f = 1 if the Pe used is right.
+    Fit f and Q by least squares (levels weighted by their thickness).
+    Returns (f, Q_fit, rms_resid/|Q_fit|). f far from 1 => the velocity
+    scaling (Pe) is off; f ~ 1 with a large residual => the problem is
+    elsewhere (non-stationary data, averaging, formulation).
+    """
+    dz = np.gradient(z)
+    sw = np.sqrt(dz)
+    A = np.column_stack([np.ones_like(z), -Nu_conv_z]) * sw[:, None]
+    coef, *_ = np.linalg.lstsq(A, Nu_cond_z * sw, rcond=None)
+    Q, f = float(coef[0]), float(coef[1])
+    resid = Nu_cond_z - (Q - f * Nu_conv_z)
+    rms = float(np.sqrt(np.sum(dz * resid ** 2) / np.sum(dz)))
+    return f, Q, rms / abs(Q)
+
+
+def nusselt_series(lev, pe, ref):
+    """
+    Per-iteration Nu_hot / Nu_cold / Nu_bulk (one row per snapshot), using
+    the same normalisation as the time-mean result `ref`
+    (nusselt_from_levels output) so the numbers are comparable.
+    """
+    rows = []
+    for i in range(len(lev["iters"])):
+        r = nusselt_from_levels(lev["z_levels"], lev["conv_it"][i], lev["cond_it"][i],
+                                lev["Tm_it"][i], pe, k_ref=ref["k_ref"], delta_T=ref["delta_T"],
+                                H=ref["H"], bulk_range=ref["bulk_range"])
+        rows.append((lev["iters"][i], r["Nu_hot"], r["Nu_cold"], r["Nu_bulk"]))
+    return np.array(rows)
+
+
+def thermal_bl(z, Tm, count_wall=True):
+    """
+    Thermal boundary-layer thickness by the slope method on the time- and
+    plane-averaged temperature profile Tm(z): the distance from each plate
+    at which the tangent of Tm at the plate reaches the centre temperature
+    T_c (Tm at mid-height, interpolated),
+
+        delta_b = |Tm[0]  - T_c| / |dTm/dz at the bottom|
+        delta_t = |Tm[-1] - T_c| / |dTm/dz at the top|
+
+    (wall slopes: second-order one-sided differences of the level means),
+    and the number of grid points (Z levels) inside each layer, i.e. at a
+    distance <= delta from the plate. count_wall=True includes the plate
+    level itself; both counts are returned. 'b'/'t' are the bottom/top
+    plates, as in the paper's N^b_BL and N^t_BL.
+    """
+    d = fd_z(Tm[:, None], z)[:, 0]
+    Tc = float(np.interp(0.5 * (z[0] + z[-1]), z, Tm))
+    delta_b = abs(Tm[0] - Tc) / abs(d[0])
+    delta_t = abs(Tm[-1] - Tc) / abs(d[-1])
+    n_b = int(np.sum(z - z[0] <= delta_b * (1 + 1e-12)))      # includes the plate level
+    n_t = int(np.sum(z[-1] - z <= delta_t * (1 + 1e-12)))
+    return {"Tc": Tc, "delta_b": float(delta_b), "delta_t": float(delta_t),
+            "N_b": n_b if count_wall else n_b - 1, "N_t": n_t if count_wall else n_t - 1,
+            "N_b_with_wall": n_b, "N_t_with_wall": n_t,
+            "N_b_no_wall": n_b - 1, "N_t_no_wall": n_t - 1}
+
+
+def nu_from_dissipation(diss_mean, pr):
+    """
+    Nu_V = 1 + sqrt(Ra Pr) <eps_u>, with eps_u = sqrt(Pr/Ra) <Phi> in
+    free-fall units; Ra cancels, leaving Nu_V = 1 + Pr * <Phi>, where Phi is
+    the viscous dissipation per unit volume with mu scaled by its reference
+    value. The exact relation behind it holds for Oberbeck-Boussinesq flow
+    only; for NOB it is just a dissipation-based estimate.
+    """
+    return 1.0 + pr * diss_mean
