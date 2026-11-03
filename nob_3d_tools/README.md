@@ -343,7 +343,66 @@ show up there.
 | `Nu_hot.npy`, `Nu_cold.npy` | conductive flux at the hot / cold wall, normalised (no-slip, so no convective part there) |
 | `Nu_bulk.npy` | volume average of Nu(z), the integral of Nu dz over `--bulk-range` (fractions of H, default the whole height; e.g. `0.1 0.9` drops the wall layers) |
 | `Nu_profile.dat` | Tecplot ASCII, columns `Z, Nu, Nu_conv, Nu_cond, T_mean` |
-| `Nu_summary.txt`, `Nu_profile.png` | all numbers and settings used; plot of Nu(z) and its parts |
+| `N_BL_bottom.npy`, `N_BL_top.npy` | number of grid points (Z levels) inside the bottom / top thermal boundary layer — the paper's `N^b_BL`, `N^t_BL` (int, 0-d); `BL_thickness_bottom.npy`, `BL_thickness_top.npy` hold the thicknesses |
+| `Nu_V.npy` | (with `--nu-v`) `Nu_V = √(RaPr)<ε_u> + 1` from the dissipation rate, as in the paper's Table 4 |
+| `Nu_series.dat` | per-snapshot `Nu_hot, Nu_cold, Nu_bulk` against iteration number |
+| `Nu_summary.txt`, `Nu_profile.png` | all numbers, diagnostics and settings used; plot of Nu(z) and its parts next to the per-snapshot series |
+
+**Thermal boundary layers.** Always computed, from the time- and plane-averaged
+`<T>(z)` by the *slope method*: δ is the distance from the plate at which the
+tangent of `<T>(z)` at the plate reaches the centre temperature `T_c` (`<T>` at
+mid-height); `N_BL` is the number of Z levels within δ of the plate. They are the
+bottom and top plates, not hot/cold, as in the paper. The plate level itself is
+counted by default (`--bl-exclude-wall` leaves it out); the summary prints both
+counts, so check which one matches the paper's convention (the paper does not
+say). This follows Wan et al. §3.4.2, which defines the thermal BL thickness "using
+the centre temperature T_c" in the same way as the viscous one (extrapolated linear
+profile meeting the line through the edge value), and §3.1.2 / Fig. 6, which use
+time- and plane-averaged temperatures with `T_c` taken at z/H = 0.5.
+
+**`Nu_V` (`--nu-v`).** With velocities in free-fall units,
+`Nu_V = 1 + Pr·<Φ>_{V,t}`, with `Φ = μ[∂ᵢuⱼ(∂ᵢuⱼ + ∂ⱼuᵢ) − ⅔(∇·u)²]` the viscous
+dissipation per unit volume (μ in units of its reference value; `Ra` cancels out
+of `√(RaPr)·√(Pr/Ra)`). It needs `--pr`, reads `U, V, mu` as well as the
+connectivity (more RAM and time), and uses per-tetrahedron gradients weighted by
+element volume. An existing checkpoint made without `--nu-v` has to be
+recomputed (`--no-resume`). **The exact relation behind Nu_V holds for
+Oberbeck–Boussinesq flow only: the paper lists Nu_V for its OB cases and none
+for ε > 0**, so for a NOB run this is only a dissipation-based estimate.
+
+**Checked against the paper (Wan et al. 2020).** Their low-Mach equations (2.1)–(2.4)
+use the free-fall velocity `u0 = (2ε ĝ Ĥ)^½`, `ρ cp (T_t + u·∇T) = (1/√(RaPr)) ∇·(k ∇T)
++ Γ dp/dt`, `cp = 1`, `p = ρT`, `k, μ` from Sutherland's law, `ΔT = 2ε`, so
+`Pe = √(RaPr)`, `k_ref = 1` and `Nu = Q/(k·2ε/H)` are exactly what this script
+assumes. **Their Nu is the one at the bottom (hot) plate** (Tables 3–4), i.e.
+`Nu_hot`. Reference values, 3-D, Pr = 0.71 (Table 4):
+
+| Ra | case | Nu (bottom) | Nu_V | N^b_BL | N^t_BL | Re |
+|---|---|---|---|---|---|---|
+| 1e8 | OB | 31.29 ± 0.02 | 31.39 | 28 | 28 | 2004.1 |
+| 1e8 | ε = 0.1 | 31.24 ± 0.08 | — | 29 | 26 | 2004.7 |
+| 1e8 | ε = 0.2 | 31.12 ± 0.03 | — | 31 | 25 | 2005.6 |
+| 1e8 | ε = 0.4 | 31.00 ± 0.03 | — | 33 | 22 | 1989.6 |
+
+(grid 384×384×392, averaged over 400 free-fall times after the transient has
+died out, "at least 10 grid points inside the thermal BLs".) The pressure term
+matters for stationarity: the thermodynamic pressure obeys
+`p ∇·u = (1/√(RaPr)) ∇·(k ∇T) − (1−Γ) dp/dt`, so any drift of `p` while you average
+makes `Nu_cold ≠ Nu_hot` and adds a term linear in z to Nu(z).
+
+**When Nu(z) is not flat — the diagnostics.** In a statistically steady closed
+cell `Nu_hot = Nu_cold = Nu(z)`. The summary reports, to tell the causes apart:
+
+| Diagnostic | What it says |
+|---|---|
+| hot/cold imbalance, and drift of `Nu_hot/Nu_cold/Nu_bulk` over the snapshots (`Nu_series.dat`) | a trend or imbalance means the averaged snapshots include a transient (or are too few); average only later iterations with `--iters` |
+| Pe self-check: best-fit `Pe_eff / Pe_used` | `≈ 1`: the velocity scaling is consistent; far from 1: `Pe` is off. Also gives the flux that a flat profile would have |
+| mass-flux term `max|Pe·T_ref·<ρ cp w>|` (column `Nu_Tref_shift`) | how much Nu(z) would change if `T_ref` were 0; large means `<ρ w>` is not ~0 (non-stationary, or the solver's continuity/energy formulation differs from the assumed conservative one) |
+| horizontal spacing max/min | the horizontal mean is a plain node mean; it is an area average only if this is ~1 |
+| s.e.m. over snapshots | assumes independent snapshots, so it is optimistic for closely spaced ones |
+
+Compare `Nu_hot` (not `Nu_bulk`) with a paper's bottom-plate Nusselt number;
+`Nu_bulk` is only meaningful once Nu(z) is flat.
 
 The `.npy` single values are 0-d arrays: `float(np.load("Nu_hot.npy"))`.
 
